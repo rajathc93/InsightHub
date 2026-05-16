@@ -120,8 +120,8 @@ st.markdown("""
 
 # ── Nav pages ─────────────────────────────────────────────────────────────────
 PAGES = [
-    {"id": "SQL Query Deduplicator", "icon": "⬡"},
-    {"id": "Hash Generator",         "icon": "⬢"},
+    {"id": "SQL Query Deduplicator"},
+    {"id": "Hash Generator"},
 ]
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -139,12 +139,12 @@ with st.sidebar:
         if is_active:
             # Active: render as a styled highlight div (no button needed)
             st.markdown(
-                f'<div class="nav-item active">{p["icon"]} &nbsp; {p["id"]}</div>',
+                f'<div class="nav-item active">{p["id"]}</div>',
                 unsafe_allow_html=True,
             )
         else:
             # Inactive: real button styled via CSS to look like a nav item
-            if st.button(f'{p["icon"]}  {p["id"]}', key=f"nav_{p['id']}",
+            if st.button(p["id"], key=f"nav_{p['id']}",
                          width='stretch'):
                 st.session_state.page = p["id"]
                 st.rerun()
