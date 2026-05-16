@@ -22,6 +22,8 @@ st.set_page_config(
 # ── Session state: active page ────────────────────────────────────────────────
 if "page" not in st.session_state:
     st.session_state.page = "SQL Query Deduplicator"
+if "df_raw" not in st.session_state:
+    st.session_state.df_raw = None
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -217,7 +219,12 @@ if st.session_state.page == "SQL Query Deduplicator":
     file_format = st.selectbox("Input format", ["Auto-detect", "CSV", "Parquet"])
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    df_raw: Optional[pd.DataFrame] = None
+    # Reset stored data when source changes
+    if "last_source" not in st.session_state:
+        st.session_state.last_source = source
+    if st.session_state.last_source != source:
+        st.session_state.df_raw = None
+        st.session_state.last_source = source
 
     if source == "Local file":
         uploaded = st.file_uploader(
@@ -230,7 +237,7 @@ if st.session_state.page == "SQL Query Deduplicator":
             if fmt == "Auto-detect":
                 fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
             try:
-                df_raw = pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
+                st.session_state.df_raw = pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
@@ -315,7 +322,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                                 frames.append(pd.read_csv(fpath, storage_options=so or None))
                             else:
                                 frames.append(pd.read_parquet(fpath, storage_options=so or None))
-                        df_raw = pd.concat(frames, ignore_index=True)
+                        st.session_state.df_raw = pd.concat(frames, ignore_index=True)
                         prog.empty()
 
             except ImportError:
@@ -324,10 +331,17 @@ if st.session_state.page == "SQL Query Deduplicator":
                 st.error(f"S3 error: {e}")
 
     # ── Data loaded — column picker + run ─────────────────────────────────────
+    df_raw = st.session_state.df_raw
     if df_raw is not None:
 
-        st.markdown(
-            f'<div style="font-size:13px;color:#6B7280;margin-bottom:16px;">'
+        info_c, clear_c = st.columns([8, 1])
+        with clear_c:
+            if st.button("✕ Clear", use_container_width=True):
+                st.session_state.df_raw = None
+                st.rerun()
+        with info_c:
+            st.markdown(
+                f'<div style="font-size:13px;color:#6B7280;padding-top:6px;">'
             f'<b style="color:#111827">{len(df_raw):,}</b> rows &nbsp;·&nbsp; '
             f'<b style="color:#111827">{df_raw.shape[1]}</b> columns &nbsp;·&nbsp; '
             f'Columns: {", ".join(f"<code>{c}</code>" for c in df_raw.columns)}'
