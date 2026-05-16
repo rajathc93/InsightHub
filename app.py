@@ -145,7 +145,7 @@ with st.sidebar:
         else:
             # Inactive: real button styled via CSS to look like a nav item
             if st.button(f'{p["icon"]}  {p["id"]}', key=f"nav_{p['id']}",
-                         use_container_width=True):
+                         width='stretch'):
                 st.session_state.page = p["id"]
                 st.rerun()
 
@@ -336,7 +336,7 @@ if st.session_state.page == "SQL Query Deduplicator":
 
         info_c, clear_c = st.columns([8, 1])
         with clear_c:
-            if st.button("✕ Clear", use_container_width=True):
+            if st.button("✕ Clear", width='stretch'):
                 st.session_state.df_raw = None
                 st.rerun()
         with info_c:
@@ -350,7 +350,7 @@ if st.session_state.page == "SQL Query Deduplicator":
         )
 
         with st.expander("Preview data (first 5 rows)", expanded=False):
-            st.dataframe(df_raw.head(5), use_container_width=True)
+            st.dataframe(df_raw.head(5), width='stretch')
 
         st.markdown("**Which column contains the SQL queries?**")
         sel_c1, sel_c2, sel_c3 = st.columns([2, 2, 2])
@@ -372,7 +372,7 @@ if st.session_state.page == "SQL Query Deduplicator":
             )
 
         with sel_c3:
-            run_btn = st.button("▶  Run analysis", type="primary", use_container_width=True)
+            run_btn = st.button("▶  Run analysis", type="primary", width='stretch')
 
         sample_vals = df_raw[query_col].dropna().astype(str).head(3).tolist()
         with st.expander(f"Preview: first 3 values from '{query_col}'", expanded=True):
@@ -452,7 +452,7 @@ if st.session_state.page == "SQL Query Deduplicator":
 
             st.dataframe(
                 dedup_df,
-                use_container_width=True,
+                width='stretch',
                 height=460,
                 column_config={
                     query_col: st.column_config.TextColumn(query_col, width="large"),
@@ -471,7 +471,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                 data=parquet_bytes,
                 file_name="unique_queries.parquet",
                 mime="application/octet-stream",
-                use_container_width=True,
+                width='stretch',
             )
 
             workspace = "/sessions/loving-magical-cannon/mnt/InsightsHub"
@@ -490,21 +490,206 @@ if st.session_state.page == "SQL Query Deduplicator":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: Hash Generator  (placeholder)
+# PAGE: Hash Generator
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "Hash Generator":
+    import hashlib
+    import re as _re
 
     st.markdown("""
     <div class="page-header">
       <h1>Hash Generator</h1>
-      <p>Generate cryptographic hashes from text or files.</p>
+      <p>Generate SHA-256 fingerprints for SQL queries and embed them as comments — making every query uniquely trackable.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="coming-soon">
-      <div class="coming-soon-icon">⬢</div>
-      <h2>Coming soon</h2>
-      <p>This tool is under construction.</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── Helper functions ──────────────────────────────────────────────────────
+    def _hash_query(query: str) -> Optional[str]:
+        if not isinstance(query, str):
+            return None
+        normalized = _re.sub(r"\s+", "", query)
+        return hashlib.sha256(normalized.encode()).hexdigest()
+
+    def _embed_hash_comment(query: str, company: str) -> str:
+        h = _hash_query(query)
+        if h is None:
+            return query
+        return f"/* {company}::{h} */\n{query}"
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    st.markdown("**Configuration**")
+    cfg_c1, cfg_c2 = st.columns([2, 4])
+    with cfg_c1:
+        company_name = st.text_input(
+            "Company / namespace",
+            value="company",
+            help="Prefix embedded in the hash comment: /* company::hash */",
+        )
+
+    st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
+
+    # ── File upload ───────────────────────────────────────────────────────────
+    st.markdown("**Upload file**")
+    hg_fmt = st.selectbox("Input format", ["Auto-detect", "CSV", "Parquet"], key="hg_fmt")
+    hg_uploaded = st.file_uploader(
+        "Upload CSV or Parquet",
+        type=["csv", "parquet", "pq"],
+        label_visibility="collapsed",
+        key="hg_upload",
+    )
+
+    if "hg_df" not in st.session_state:
+        st.session_state.hg_df = None
+
+    if hg_uploaded:
+        fmt = hg_fmt
+        if fmt == "Auto-detect":
+            fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+        try:
+            st.session_state.hg_df = pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+
+    hg_df = st.session_state.hg_df
+
+    if hg_df is not None:
+
+        info_c, clear_c = st.columns([8, 1])
+        with clear_c:
+            if st.button("✕ Clear", key="hg_clear", width='stretch'):
+                st.session_state.hg_df = None
+                st.rerun()
+        with info_c:
+            st.markdown(
+                f'<div style="font-size:13px;color:#6B7280;padding-top:6px;">'
+                f'<b style="color:#111827">{len(hg_df):,}</b> rows &nbsp;·&nbsp; '
+                f'<b style="color:#111827">{hg_df.shape[1]}</b> columns &nbsp;·&nbsp; '
+                f'Columns: {", ".join(f"<code>{c}</code>" for c in hg_df.columns)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("Preview data (first 5 rows)", expanded=False):
+            st.dataframe(hg_df.head(5), width='stretch')
+
+        # ── Column + output config ────────────────────────────────────────────
+        st.markdown("**Which column contains the SQL queries?**")
+        col_c1, col_c2, col_c3 = st.columns([2, 2, 2])
+
+        with col_c1:
+            hg_query_col = st.selectbox(
+                "SQL query column",
+                options=list(hg_df.columns),
+                label_visibility="collapsed",
+                key="hg_query_col",
+            )
+        with col_c2:
+            hg_hash_col = st.text_input(
+                "Hash column name",
+                value="query_hash",
+                help="Name of the new column that will store the SHA-256 hash.",
+                key="hg_hash_col",
+            )
+        with col_c3:
+            hg_out_fmt = st.selectbox(
+                "Output format",
+                ["Parquet", "CSV"],
+                key="hg_out_fmt",
+                help="Parquet recommended for large files — no cell character limits.",
+            )
+
+        sample_vals = hg_df[hg_query_col].dropna().astype(str).head(2).tolist()
+        with st.expander(f"Preview: first 2 values from '{hg_query_col}'", expanded=True):
+            for v in sample_vals:
+                st.code(v, language="sql")
+
+        st.markdown(
+            f'<p style="font-size:12.5px;color:#6B7280;margin:8px 0 16px 0">'
+            f'Each query will get a <code>/* {company_name or "company"}::&lt;sha256&gt; */</code> '
+            f'comment prepended and a new <code>{hg_hash_col}</code> column added.</p>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<hr style="margin:4px 0 16px 0">', unsafe_allow_html=True)
+
+        hg_run = st.button("▶  Generate hashes", type="primary")
+
+        if hg_run:
+            company = company_name.strip() or "company"
+            prog = st.progress(0, text="Generating hashes…")
+
+            out_df = hg_df.copy()
+            hashes, commented = [], []
+            total = len(out_df)
+
+            for i, q in enumerate(out_df[hg_query_col].astype(str)):
+                hashes.append(_hash_query(q))
+                commented.append(_embed_hash_comment(q, company))
+                if i % 500 == 0:
+                    prog.progress(min(i / total, 1.0), text=f"Hashing…  {i:,} / {total:,}")
+
+            out_df[hg_hash_col]    = hashes
+            out_df[hg_query_col]   = commented
+            prog.progress(1.0, text="Done")
+            prog.empty()
+
+            # ── Stats ─────────────────────────────────────────────────────────
+            unique_hashes = out_df[hg_hash_col].nunique()
+            null_count    = out_df[hg_hash_col].isna().sum()
+            st.markdown(f"""
+            <div class="stats-row">
+              <div class="stat-card">
+                <div class="stat-label">Total rows</div>
+                <div class="stat-value">{total:,}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Unique hashes</div>
+                <div class="stat-value purple">{unique_hashes:,}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Duplicate queries</div>
+                <div class="stat-value">{total - unique_hashes:,}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Null / skipped</div>
+                <div class="stat-value">{null_count:,}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Preview output ────────────────────────────────────────────────
+            st.markdown(
+                f'<div class="results-header">'
+                f'<span class="results-title">Output preview</span>'
+                f'<span class="results-count">first 5 rows</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(out_df.head(5), width='stretch')
+
+            # ── Download ──────────────────────────────────────────────────────
+            st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+            buf = io.BytesIO()
+            if hg_out_fmt == "Parquet":
+                out_df.to_parquet(buf, index=False)
+                dl_name = "hashed_queries.parquet"
+                dl_mime = "application/octet-stream"
+            else:
+                buf.write(out_df.to_csv(index=False).encode())
+                dl_name = "hashed_queries.csv"
+                dl_mime = "text/csv"
+
+            st.download_button(
+                "⬇  Download output",
+                data=buf.getvalue(),
+                file_name=dl_name,
+                mime=dl_mime,
+            )
+
+            st.markdown(
+                '<p style="font-size:12px;color:#9CA3AF;margin-top:12px">'
+                f'Hash format: <code>/* {company}::&lt;sha256&gt; */</code> — '
+                'whitespace is stripped before hashing so formatting differences do not produce different hashes.'
+                '</p>',
+                unsafe_allow_html=True,
+            )
