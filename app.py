@@ -11,6 +11,77 @@ import streamlit as st
 
 from normalizer import normalize, fingerprint_id
 
+
+# ── Shared output helper ──────────────────────────────────────────────────────
+def _output_widget(df: pd.DataFrame, default_filename: str,
+                   fmt: str, note: str, key_prefix: str,
+                   aws_key: str, aws_secret: str, aws_token: str):
+    """
+    Renders a Download / Write to S3 output section.
+    fmt: 'Parquet' or 'CSV'
+    """
+    st.markdown("**Save output**")
+    dest = st.radio(
+        "Output destination",
+        ["Download locally", "Write to S3"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"{key_prefix}_dest",
+    )
+
+    # Serialise once
+    buf = io.BytesIO()
+    if fmt == "Parquet":
+        df.to_parquet(buf, index=False)
+        mime     = "application/octet-stream"
+        filename = default_filename if default_filename.endswith(".parquet") else default_filename + ".parquet"
+    else:
+        buf.write(df.to_csv(index=False).encode())
+        mime     = "text/csv"
+        filename = default_filename if default_filename.endswith(".csv") else default_filename + ".csv"
+    file_bytes = buf.getvalue()
+
+    if dest == "Download locally":
+        st.download_button(
+            f"⬇  Download {fmt}",
+            data=file_bytes,
+            file_name=filename,
+            mime=mime,
+            key=f"{key_prefix}_dl",
+        )
+
+    else:  # Write to S3
+        s3_out = st.text_input(
+            "S3 output path",
+            placeholder="s3://my-bucket/output/results.parquet",
+            key=f"{key_prefix}_s3out",
+            help="Full S3 path including filename.",
+        )
+        if st.button("☁  Write to S3", type="primary", key=f"{key_prefix}_s3btn"):
+            if not s3_out:
+                st.warning("Enter an S3 output path first.")
+            else:
+                try:
+                    import s3fs
+                    kw = {}
+                    if aws_key:    kw["key"]    = aws_key
+                    if aws_secret: kw["secret"] = aws_secret
+                    if aws_token:  kw["token"]  = aws_token
+                    fs = s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
+                    with fs.open(s3_out, "wb") as f:
+                        f.write(file_bytes)
+                    st.success(f"Written → `{s3_out}`")
+                except ImportError:
+                    st.error("s3fs is not installed. Run: pip install s3fs")
+                except Exception as e:
+                    st.error(f"S3 write failed: {e}")
+
+    if note:
+        st.markdown(
+            f'<p style="font-size:12px;color:#9CA3AF;margin-top:10px">{note}</p>',
+            unsafe_allow_html=True,
+        )
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="InsightsHub",
@@ -457,33 +528,14 @@ if st.session_state.page == "SQL Query Deduplicator":
                 },
             )
 
-            st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
-            dl_c1, dl_c2, _ = st.columns([1, 1, 4])
-
-            buf = io.BytesIO()
-            dedup_df.to_parquet(buf, index=False)
-            parquet_bytes = buf.getvalue()
-
-            dl_c1.download_button(
-                "⬇  Download Parquet",
-                data=parquet_bytes,
-                file_name="unique_queries.parquet",
-                mime="application/octet-stream",
-                width='stretch',
-            )
-
-            workspace = "/sessions/loving-magical-cannon/mnt/InsightsHub"
-            if os.path.isdir(workspace):
-                save_path = os.path.join(workspace, "unique_queries.parquet")
-                dedup_df.to_parquet(save_path, index=False)
-                dl_c2.success("Saved → unique_queries.parquet")
-
-            st.markdown(
-                '<p style="font-size:12px;color:#9CA3AF;margin-top:12px">'
-                'Output is the original query text — comments, casing, and filter values are untouched. '
-                'Parquet is used to avoid cell character limits in CSV.'
-                '</p>',
-                unsafe_allow_html=True,
+            st.markdown('<hr style="margin:16px 0">', unsafe_allow_html=True)
+            _output_widget(
+                df=dedup_df,
+                default_filename="unique_queries.parquet",
+                fmt="Parquet",
+                note="Output is the original query text — comments, casing, and filter values are untouched. Parquet is used to avoid CSV cell character limits.",
+                key_prefix="dedup",
+                aws_key=aws_key, aws_secret=aws_secret, aws_token=aws_token,
             )
 
 
@@ -665,29 +717,13 @@ elif st.session_state.page == "Hash Generator":
             )
             st.dataframe(out_df.head(5), width='stretch')
 
-            # ── Download ──────────────────────────────────────────────────────
-            st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
-            buf = io.BytesIO()
-            if hg_out_fmt == "Parquet":
-                out_df.to_parquet(buf, index=False)
-                dl_name = "hashed_queries.parquet"
-                dl_mime = "application/octet-stream"
-            else:
-                buf.write(out_df.to_csv(index=False).encode())
-                dl_name = "hashed_queries.csv"
-                dl_mime = "text/csv"
-
-            st.download_button(
-                "⬇  Download output",
-                data=buf.getvalue(),
-                file_name=dl_name,
-                mime=dl_mime,
-            )
-
-            st.markdown(
-                '<p style="font-size:12px;color:#9CA3AF;margin-top:12px">'
-                f'Hash format: <code>/* {company}::&lt;sha256&gt; */</code> — '
-                'whitespace is stripped before hashing so formatting differences do not produce different hashes.'
-                '</p>',
-                unsafe_allow_html=True,
+            # ── Output ────────────────────────────────────────────────────────
+            st.markdown('<hr style="margin:16px 0">', unsafe_allow_html=True)
+            _output_widget(
+                df=out_df,
+                default_filename="hashed_queries",
+                fmt=hg_out_fmt,
+                note=f"Hash format: <code>/* {company}::&lt;sha256&gt; */</code> — whitespace is stripped before hashing so formatting differences do not affect the hash.",
+                key_prefix="hg",
+                aws_key=aws_key, aws_secret=aws_secret, aws_token=aws_token,
             )
