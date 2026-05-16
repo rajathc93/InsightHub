@@ -151,52 +151,50 @@ with st.sidebar:
 
     st.markdown('<hr>', unsafe_allow_html=True)
 
-    # S3 credentials — only relevant for SQL Query Deduplicator
-    if st.session_state.page == "SQL Query Deduplicator":
-        st.markdown('<div class="sidebar-section">Settings</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section">Settings</div>', unsafe_allow_html=True)
 
-        try:
-            _secrets = st.secrets.get("aws", {})
-        except Exception:
-            _secrets = {}
+    try:
+        _secrets = st.secrets.get("aws", {})
+    except Exception:
+        _secrets = {}
 
-        with st.expander("S3 credentials"):
-            st.markdown(
-                '<p style="font-size:12px;color:#6B7280;margin:0 0 10px 0">'
-                '<b>Running locally?</b> Leave blank — credentials are read from '
-                '<code>~/.aws/credentials</code> or environment variables automatically.<br>'
-                '<b>Deployed to Streamlit Cloud?</b> Add an <code>[aws]</code> section in '
-                'your app\'s Secrets dashboard and leave these fields blank.'
-                '</p>',
-                unsafe_allow_html=True,
-            )
-            aws_key = st.text_input(
-                "AWS_ACCESS_KEY_ID",
-                value=_secrets.get("AWS_ACCESS_KEY_ID", ""),
-                type="password",
-                placeholder="AKIAxxxxxxxxxxxxxxxx",
-                help="IAM user access key. Not needed if credentials are configured via secrets or env vars.",
-            )
-            aws_secret = st.text_input(
-                "AWS_SECRET_ACCESS_KEY",
-                value=_secrets.get("AWS_SECRET_ACCESS_KEY", ""),
-                type="password",
-                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-                help="IAM user secret key.",
-            )
-            aws_token = st.text_input(
-                "AWS_SESSION_TOKEN",
-                value=_secrets.get("AWS_SESSION_TOKEN", ""),
-                type="password",
-                placeholder="Optional — only for STS / AssumeRole / SSO temporary credentials",
-                help="Only needed when using temporary credentials (STS AssumeRole, AWS SSO, aws-vault). Leave blank for plain IAM keys.",
-            )
-            st.markdown(
-                '<p style="font-size:11px;color:#9CA3AF;margin:8px 0 0 0">'
-                '🔒 Credentials entered here are held in memory for this browser session only and never written to disk.'
-                '</p>',
-                unsafe_allow_html=True,
-            )
+    with st.expander("S3 credentials"):
+        st.markdown(
+            '<p style="font-size:12px;color:#6B7280;margin:0 0 10px 0">'
+            '<b>Running locally?</b> Leave blank — credentials are read from '
+            '<code>~/.aws/credentials</code> or environment variables automatically.<br>'
+            '<b>Deployed to Streamlit Cloud?</b> Add an <code>[aws]</code> section in '
+            'your app\'s Secrets dashboard and leave these fields blank.'
+            '</p>',
+            unsafe_allow_html=True,
+        )
+        aws_key = st.text_input(
+            "AWS_ACCESS_KEY_ID",
+            value=_secrets.get("AWS_ACCESS_KEY_ID", ""),
+            type="password",
+            placeholder="AKIAxxxxxxxxxxxxxxxx",
+            help="IAM user access key. Not needed if credentials are configured via secrets or env vars.",
+        )
+        aws_secret = st.text_input(
+            "AWS_SECRET_ACCESS_KEY",
+            value=_secrets.get("AWS_SECRET_ACCESS_KEY", ""),
+            type="password",
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            help="IAM user secret key.",
+        )
+        aws_token = st.text_input(
+            "AWS_SESSION_TOKEN",
+            value=_secrets.get("AWS_SESSION_TOKEN", ""),
+            type="password",
+            placeholder="Optional — only for STS / AssumeRole / SSO temporary credentials",
+            help="Only needed when using temporary credentials (STS AssumeRole, AWS SSO, aws-vault). Leave blank for plain IAM keys.",
+        )
+        st.markdown(
+            '<p style="font-size:11px;color:#9CA3AF;margin:8px 0 0 0">'
+            '🔒 Credentials entered here are held in memory for this browser session only and never written to disk.'
+            '</p>',
+            unsafe_allow_html=True,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
