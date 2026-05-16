@@ -1,5 +1,5 @@
 """
-SQL Query Pattern Deduplicator
+InsightsHub — multi-tool analytics app
 """
 
 import io
@@ -19,7 +19,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Minimal CSS additions on top of the configured theme ─────────────────────
+# ── Session state: active page ────────────────────────────────────────────────
+if "page" not in st.session_state:
+    st.session_state.page = "SQL Query Deduplicator"
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 #MainMenu, footer { visibility: hidden; }
@@ -38,12 +42,32 @@ st.markdown("""
 }
 .sidebar-logo-text { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
 
+/* ── Nav items ────────────────────────────────────────────────────────────── */
 .nav-item {
     display: flex; align-items: center; gap: 10px;
     padding: 9px 12px; margin: 2px 4px; border-radius: 6px;
-    font-size: 13.5px; font-weight: 500; cursor: default;
+    font-size: 13.5px; font-weight: 600; cursor: default;
 }
-.nav-item.active { background: #EDE9FF; color: #5B3FD9; font-weight: 600; }
+.nav-item.active { background: #EDE9FF; color: #5B3FD9; }
+
+/* Style sidebar buttons to look like nav items */
+[data-testid="stSidebar"] .stButton > button {
+    background: transparent !important;
+    border: none !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    color: #374151 !important;
+    font-size: 13.5px !important;
+    font-weight: 500 !important;
+    padding: 9px 12px !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    width: 100% !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: #F3F4F6 !important;
+    color: #111827 !important;
+}
 
 .sidebar-section {
     font-size: 11px; font-weight: 600; color: #9CA3AF;
@@ -78,10 +102,25 @@ st.markdown("""
     border: 1px solid #E5E7EB; border-radius: 5px; padding: 6px 12px; margin: 3px 0;
 }
 
+/* ── Coming soon ──────────────────────────────────────────────────────────── */
+.coming-soon {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 340px; color: #9CA3AF; text-align: center;
+}
+.coming-soon-icon { font-size: 40px; margin-bottom: 14px; }
+.coming-soon h2   { font-size: 18px; font-weight: 600; color: #374151; margin: 0 0 6px 0; }
+.coming-soon p    { font-size: 13.5px; margin: 0; }
+
 /* ── Main content padding ─────────────────────────────────────────────────── */
 .block-container { padding-top: 20px !important; max-width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Nav pages ─────────────────────────────────────────────────────────────────
+PAGES = [
+    {"id": "SQL Query Deduplicator", "icon": "⬡"},
+    {"id": "Hash Generator",         "icon": "⬢"},
+]
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -90,339 +129,368 @@ with st.sidebar:
         <div class="sidebar-logo-icon">I</div>
         <span class="sidebar-logo-text">InsightsHub</span>
     </div>
-    <div class="nav-item active">⬡ &nbsp; Deduplicate</div>
-    <div class="sidebar-section">Settings</div>
+    <div class="sidebar-section">Tools</div>
     """, unsafe_allow_html=True)
 
-    source = st.radio("Data source", ["Local file", "S3 path"], horizontal=True, label_visibility="collapsed")
+    for p in PAGES:
+        is_active = st.session_state.page == p["id"]
+        if is_active:
+            # Active: render as a styled highlight div (no button needed)
+            st.markdown(
+                f'<div class="nav-item active">{p["icon"]} &nbsp; {p["id"]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # Inactive: real button styled via CSS to look like a nav item
+            if st.button(f'{p["icon"]}  {p["id"]}', key=f"nav_{p['id']}",
+                         use_container_width=True):
+                st.session_state.page = p["id"]
+                st.rerun()
+
+    st.markdown('<hr>', unsafe_allow_html=True)
+
+    # S3 credentials — only relevant for SQL Query Deduplicator
+    if st.session_state.page == "SQL Query Deduplicator":
+        st.markdown('<div class="sidebar-section">Settings</div>', unsafe_allow_html=True)
+
+        try:
+            _secrets = st.secrets.get("aws", {})
+        except Exception:
+            _secrets = {}
+
+        with st.expander("S3 credentials"):
+            st.markdown(
+                '<p style="font-size:12px;color:#6B7280;margin:0 0 10px 0">'
+                '<b>Running locally?</b> Leave blank — credentials are read from '
+                '<code>~/.aws/credentials</code> or environment variables automatically.<br>'
+                '<b>Deployed to Streamlit Cloud?</b> Add an <code>[aws]</code> section in '
+                'your app\'s Secrets dashboard and leave these fields blank.'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+            aws_key = st.text_input(
+                "AWS_ACCESS_KEY_ID",
+                value=_secrets.get("AWS_ACCESS_KEY_ID", ""),
+                type="password",
+                placeholder="AKIAxxxxxxxxxxxxxxxx",
+                help="IAM user access key. Not needed if credentials are configured via secrets or env vars.",
+            )
+            aws_secret = st.text_input(
+                "AWS_SECRET_ACCESS_KEY",
+                value=_secrets.get("AWS_SECRET_ACCESS_KEY", ""),
+                type="password",
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                help="IAM user secret key.",
+            )
+            aws_token = st.text_input(
+                "AWS_SESSION_TOKEN",
+                value=_secrets.get("AWS_SESSION_TOKEN", ""),
+                type="password",
+                placeholder="Optional — only for STS / AssumeRole / SSO temporary credentials",
+                help="Only needed when using temporary credentials (STS AssumeRole, AWS SSO, aws-vault). Leave blank for plain IAM keys.",
+            )
+            st.markdown(
+                '<p style="font-size:11px;color:#9CA3AF;margin:8px 0 0 0">'
+                '🔒 Credentials entered here are held in memory for this browser session only and never written to disk.'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: SQL Query Deduplicator
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.page == "SQL Query Deduplicator":
+
+    st.markdown("""
+    <div class="page-header">
+      <h1>SQL Query Deduplicator</h1>
+      <p>Identify structurally identical queries that differ only in filter values — get back one runnable query per unique pattern.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Source selector ───────────────────────────────────────────────────────
+    source = st.radio("Data source", ["Local file", "S3 path"], horizontal=True,
+                      label_visibility="collapsed")
     st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
 
     file_format = st.selectbox("Input format", ["Auto-detect", "CSV", "Parquet"])
 
-    st.markdown('<hr>', unsafe_allow_html=True)
+    # ── Load data ─────────────────────────────────────────────────────────────
+    df_raw: Optional[pd.DataFrame] = None
 
-    # Pull defaults from Streamlit secrets if available (cloud deployments)
-    # In Streamlit Cloud: set [aws] section in the Secrets dashboard
-    try:
-        _secrets = st.secrets.get("aws", {})
-    except Exception:
-        _secrets = {}
-
-    with st.expander("S3 credentials"):
-        st.markdown(
-            '<p style="font-size:12px;color:#6B7280;margin:0 0 10px 0">'
-            '<b>Running locally?</b> Leave blank — credentials are read from '
-            '<code>~/.aws/credentials</code> or environment variables automatically.<br>'
-            '<b>Deployed to Streamlit Cloud?</b> Add an <code>[aws]</code> section in '
-            'your app\'s Secrets dashboard and leave these fields blank.'
-            '</p>',
-            unsafe_allow_html=True,
-        )
-        aws_key = st.text_input(
-            "AWS_ACCESS_KEY_ID",
-            value=_secrets.get("AWS_ACCESS_KEY_ID", ""),
-            type="password",
-            placeholder="AKIAxxxxxxxxxxxxxxxx",
-            help="IAM user access key. Not needed if credentials are configured via secrets or env vars.",
-        )
-        aws_secret = st.text_input(
-            "AWS_SECRET_ACCESS_KEY",
-            value=_secrets.get("AWS_SECRET_ACCESS_KEY", ""),
-            type="password",
-            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            help="IAM user secret key.",
-        )
-        aws_token = st.text_input(
-            "AWS_SESSION_TOKEN",
-            value=_secrets.get("AWS_SESSION_TOKEN", ""),
-            type="password",
-            placeholder="Optional — only for STS / AssumeRole / SSO temporary credentials",
-            help="Only needed when using temporary credentials (STS AssumeRole, AWS SSO, aws-vault). Leave blank for plain IAM keys.",
-        )
-        st.markdown(
-            '<p style="font-size:11px;color:#9CA3AF;margin:8px 0 0 0">'
-            '🔒 Credentials entered here are held in memory for this browser session only and never written to disk.'
-            '</p>',
-            unsafe_allow_html=True,
-        )
-
-# ── Page header ───────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="page-header">
-  <div class="page-header-left">
-    <h1>SQL Query Deduplicator</h1>
-    <p>Identify structurally identical queries that differ only in filter values — get back one runnable query per unique pattern.</p>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Load data ─────────────────────────────────────────────────────────────────
-df_raw: Optional[pd.DataFrame] = None
-
-if source == "Local file":
-    uploaded = st.file_uploader(
-        "Upload a CSV or Parquet file",
-        type=["csv", "parquet", "pq"],
-        label_visibility="collapsed",
-    )
-    if uploaded:
-        fmt = file_format
-        if fmt == "Auto-detect":
-            fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-        try:
-            df_raw = pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-
-else:  # S3
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        s3_prefix = st.text_input(
-            "S3 path / prefix",
-            placeholder="s3://my-bucket/queries/",
-        )
-    with c2:
-        s3_pattern = st.text_input(
-            "File pattern",
-            placeholder="*.parquet",
-            help="Glob (*.parquet, 2024-*) or Python regex. Leave blank for single file.",
-        )
-
-    btn_c1, btn_c2, _ = st.columns([1, 1, 4])
-    list_btn = btn_c1.button("List files", type="secondary")
-    load_s3  = btn_c2.button("Load from S3", type="primary")
-
-    def _build_s3fs(key, secret, token):
-        import s3fs
-        kw = {}
-        if key:    kw["key"]    = key
-        if secret: kw["secret"] = secret
-        if token:  kw["token"]  = token
-        return s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
-
-    def _resolve_files(fs, prefix, pattern, fmt):
-        import re as _re, fnmatch
-        bare = prefix.replace("s3://", "")
-        if not pattern:
-            return [prefix.rstrip("/")]
-        try:
-            all_files = ["s3://" + f for f in fs.find(bare) if not f.endswith("/")]
-        except Exception:
-            all_files = []
-        ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
-                   "Auto-detect": (".csv", ".parquet", ".pq")}
-        exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
-        all_files = [f for f in all_files if f.lower().endswith(exts)]
-        try:
-            matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
-            if not matched:
-                rx = _re.compile(pattern)
-                matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-        except _re.error:
-            matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
-        return sorted(matched)
-
-    if (list_btn or load_s3) and s3_prefix:
-        try:
-            import s3fs
-            fs    = _build_s3fs(aws_key, aws_secret, aws_token)
-            so    = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
-            fmt   = file_format
-            if fmt == "Auto-detect":
-                fmt = "Parquet" if s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
-
-            matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
-
-            if not matched_files:
-                st.warning("No files matched. Check your path and pattern.")
-            else:
-                st.markdown(
-                    f'<div class="results-header">'
-                    f'<span class="results-title">Matched files</span>'
-                    f'<span class="results-count">{len(matched_files)} result{"s" if len(matched_files)!=1 else ""}</span>'
-                    f'</div>', unsafe_allow_html=True
-                )
-                for f in matched_files:
-                    st.markdown(f'<div class="file-list-item">{f}</div>', unsafe_allow_html=True)
-
-                if load_s3:
-                    frames = []
-                    prog = st.progress(0, text="Loading files…")
-                    for i, fpath in enumerate(matched_files):
-                        prog.progress((i + 1) / len(matched_files),
-                                      text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched_files)})")
-                        if fmt == "CSV":
-                            frames.append(pd.read_csv(fpath, storage_options=so or None))
-                        else:
-                            frames.append(pd.read_parquet(fpath, storage_options=so or None))
-                    df_raw = pd.concat(frames, ignore_index=True)
-                    prog.empty()
-
-        except ImportError:
-            st.error("s3fs is not installed. Run: pip install s3fs")
-        except Exception as e:
-            st.error(f"S3 error: {e}")
-
-# ── Data loaded — column picker + run ─────────────────────────────────────────
-if df_raw is not None:
-
-    # ── Info strip ────────────────────────────────────────────────────────────
-    st.markdown(
-        f'<div style="font-size:13px;color:#6B7280;margin-bottom:16px;">'
-        f'<b style="color:#111827">{len(df_raw):,}</b> rows &nbsp;·&nbsp; '
-        f'<b style="color:#111827">{df_raw.shape[1]}</b> columns &nbsp;·&nbsp; '
-        f'Columns: {", ".join(f"<code>{c}</code>" for c in df_raw.columns)}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Preview data (first 5 rows)", expanded=False):
-        st.dataframe(df_raw.head(5), use_container_width=True)
-
-    # ── Column selector ───────────────────────────────────────────────────────
-    st.markdown("**Which column contains the SQL queries?**")
-    sel_c1, sel_c2, sel_c3 = st.columns([2, 2, 2])
-
-    with sel_c1:
-        query_col = st.selectbox(
-            "SQL query column",
-            options=list(df_raw.columns),
-            help="Select the column that contains the SQL query text to be analysed.",
+    if source == "Local file":
+        uploaded = st.file_uploader(
+            "Upload a CSV or Parquet file",
+            type=["csv", "parquet", "pq"],
             label_visibility="collapsed",
         )
+        if uploaded:
+            fmt = file_format
+            if fmt == "Auto-detect":
+                fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+            try:
+                df_raw = pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
 
-    with sel_c2:
+    else:  # S3
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            s3_prefix = st.text_input(
+                "S3 path / prefix",
+                placeholder="s3://my-bucket/queries/",
+            )
+        with c2:
+            s3_pattern = st.text_input(
+                "File pattern",
+                placeholder="*.parquet",
+                help="Glob (*.parquet, 2024-*) or Python regex. Leave blank for single file.",
+            )
+
+        btn_c1, btn_c2, _ = st.columns([1, 1, 4])
+        list_btn = btn_c1.button("List files", type="secondary")
+        load_s3  = btn_c2.button("Load from S3", type="primary")
+
+        def _build_s3fs(key, secret, token):
+            import s3fs
+            kw = {}
+            if key:    kw["key"]    = key
+            if secret: kw["secret"] = secret
+            if token:  kw["token"]  = token
+            return s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
+
+        def _resolve_files(fs, prefix, pattern, fmt):
+            import re as _re, fnmatch
+            bare = prefix.replace("s3://", "")
+            if not pattern:
+                return [prefix.rstrip("/")]
+            try:
+                all_files = ["s3://" + f for f in fs.find(bare) if not f.endswith("/")]
+            except Exception:
+                all_files = []
+            ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
+                       "Auto-detect": (".csv", ".parquet", ".pq")}
+            exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+            all_files = [f for f in all_files if f.lower().endswith(exts)]
+            try:
+                matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
+                if not matched:
+                    rx = _re.compile(pattern)
+                    matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+            except _re.error:
+                matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
+            return sorted(matched)
+
+        if (list_btn or load_s3) and s3_prefix:
+            try:
+                import s3fs
+                fs    = _build_s3fs(aws_key, aws_secret, aws_token)
+                so    = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
+                fmt   = file_format
+                if fmt == "Auto-detect":
+                    fmt = "Parquet" if s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
+
+                matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
+
+                if not matched_files:
+                    st.warning("No files matched. Check your path and pattern.")
+                else:
+                    st.markdown(
+                        f'<div class="results-header">'
+                        f'<span class="results-title">Matched files</span>'
+                        f'<span class="results-count">{len(matched_files)} result{"s" if len(matched_files)!=1 else ""}</span>'
+                        f'</div>', unsafe_allow_html=True
+                    )
+                    for f in matched_files:
+                        st.markdown(f'<div class="file-list-item">{f}</div>', unsafe_allow_html=True)
+
+                    if load_s3:
+                        frames = []
+                        prog = st.progress(0, text="Loading files…")
+                        for i, fpath in enumerate(matched_files):
+                            prog.progress((i + 1) / len(matched_files),
+                                          text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched_files)})")
+                            if fmt == "CSV":
+                                frames.append(pd.read_csv(fpath, storage_options=so or None))
+                            else:
+                                frames.append(pd.read_parquet(fpath, storage_options=so or None))
+                        df_raw = pd.concat(frames, ignore_index=True)
+                        prog.empty()
+
+            except ImportError:
+                st.error("s3fs is not installed. Run: pip install s3fs")
+            except Exception as e:
+                st.error(f"S3 error: {e}")
+
+    # ── Data loaded — column picker + run ─────────────────────────────────────
+    if df_raw is not None:
+
         st.markdown(
-            f'<div style="padding-top:8px;font-size:12.5px;color:#6B7280;">'
-            f'dtype: <b>{df_raw[query_col].dtype}</b> &nbsp;·&nbsp; '
-            f'{df_raw[query_col].notna().sum():,} non-null values</div>',
-            unsafe_allow_html=True,
-        )
-
-    with sel_c3:
-        run_btn = st.button("▶  Run analysis", type="primary", use_container_width=True)
-
-    # Preview selected column values
-    sample_vals = df_raw[query_col].dropna().astype(str).head(3).tolist()
-    with st.expander(f"Preview: first 3 values from  '{query_col}'", expanded=True):
-        for v in sample_vals:
-            st.code(v, language="sql")
-
-    st.markdown('<hr style="margin:12px 0 20px 0">', unsafe_allow_html=True)
-
-    # ── Run deduplication ─────────────────────────────────────────────────────
-    if run_btn:
-        queries = df_raw[query_col].dropna().astype(str)
-        total   = len(queries)
-
-        prog = st.progress(0, text="Normalising queries…")
-
-        # Work on full original df (preserve all columns), add pattern columns
-        work_df = df_raw.copy()
-        norms, fids = [], []
-        for i, q in enumerate(df_raw[query_col].fillna("").astype(str)):
-            norm = normalize(q)
-            norms.append(norm)
-            fids.append(fingerprint_id(norm))
-            if i % 500 == 0:
-                prog.progress(min(i / total, 1.0),
-                              text=f"Normalising…  {i:,} / {total:,}")
-
-        work_df["_pattern"]    = norms
-        work_df["_pattern_id"] = fids
-
-        prog.progress(1.0, text="Grouping…")
-
-        # Add count of how many rows share each pattern
-        work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
-
-        # Sort: most common patterns first, queries within a group stay together
-        result_df = (
-            work_df
-            .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
-            .reset_index(drop=True)
-        )
-
-        unique_patterns = work_df["_pattern_id"].nunique()
-        prog.empty()
-
-        # ── Stats cards ───────────────────────────────────────────────────────
-        st.markdown(f"""
-        <div class="stats-row">
-          <div class="stat-card">
-            <div class="stat-label">Total queries</div>
-            <div class="stat-value">{total:,}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Unique patterns</div>
-            <div class="stat-value purple">{unique_patterns:,}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Avg queries / pattern</div>
-            <div class="stat-value">{total / unique_patterns:.1f}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Reduction potential</div>
-            <div class="stat-value green">{(1 - unique_patterns/total)*100:.1f}%</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ── Deduplicate: one query per pattern (first seen), original text ───────
-        # Pick the first query from each pattern group — preserves comments,
-        # original casing, and all filter values exactly as written.
-        dedup_df = (
-            result_df
-            .groupby("_pattern_id", sort=False)[query_col]
-            .first()
-            .reset_index(drop=True)
-            .to_frame(name=query_col)
-        )
-
-        # ── Results table ─────────────────────────────────────────────────────
-        st.markdown(
-            f'<div class="results-header">'
-            f'<span class="results-title">Unique queries</span>'
-            f'<span class="results-count">{total:,} input → {len(dedup_df):,} unique patterns</span>'
+            f'<div style="font-size:13px;color:#6B7280;margin-bottom:16px;">'
+            f'<b style="color:#111827">{len(df_raw):,}</b> rows &nbsp;·&nbsp; '
+            f'<b style="color:#111827">{df_raw.shape[1]}</b> columns &nbsp;·&nbsp; '
+            f'Columns: {", ".join(f"<code>{c}</code>" for c in df_raw.columns)}'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-        st.dataframe(
-            dedup_df,
-            use_container_width=True,
-            height=460,
-            column_config={
-                query_col: st.column_config.TextColumn(query_col, width="large"),
-            },
-        )
+        with st.expander("Preview data (first 5 rows)", expanded=False):
+            st.dataframe(df_raw.head(5), use_container_width=True)
 
-        # ── Download as Parquet ───────────────────────────────────────────────
-        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
-        dl_c1, dl_c2, _ = st.columns([1, 1, 4])
+        st.markdown("**Which column contains the SQL queries?**")
+        sel_c1, sel_c2, sel_c3 = st.columns([2, 2, 2])
 
-        buf = io.BytesIO()
-        dedup_df.to_parquet(buf, index=False)
-        parquet_bytes = buf.getvalue()
+        with sel_c1:
+            query_col = st.selectbox(
+                "SQL query column",
+                options=list(df_raw.columns),
+                help="Select the column that contains the SQL query text to be analysed.",
+                label_visibility="collapsed",
+            )
 
-        dl_c1.download_button(
-            "⬇  Download Parquet",
-            data=parquet_bytes,
-            file_name="unique_queries.parquet",
-            mime="application/octet-stream",
-            use_container_width=True,
-        )
+        with sel_c2:
+            st.markdown(
+                f'<div style="padding-top:8px;font-size:12.5px;color:#6B7280;">'
+                f'dtype: <b>{df_raw[query_col].dtype}</b> &nbsp;·&nbsp; '
+                f'{df_raw[query_col].notna().sum():,} non-null values</div>',
+                unsafe_allow_html=True,
+            )
 
-        workspace = "/sessions/loving-magical-cannon/mnt/InsightsHub"
-        if os.path.isdir(workspace):
-            save_path = os.path.join(workspace, "unique_queries.parquet")
-            dedup_df.to_parquet(save_path, index=False)
-            dl_c2.success("Saved → unique_queries.parquet")
+        with sel_c3:
+            run_btn = st.button("▶  Run analysis", type="primary", use_container_width=True)
 
-        st.markdown(
-            '<p style="font-size:12px;color:#9CA3AF;margin-top:12px">'
-            'Output is the original query text — comments, casing, and filter values are untouched. '
-            'Parquet is used to avoid cell character limits in CSV.'
-            '</p>',
-            unsafe_allow_html=True,
-        )
+        sample_vals = df_raw[query_col].dropna().astype(str).head(3).tolist()
+        with st.expander(f"Preview: first 3 values from '{query_col}'", expanded=True):
+            for v in sample_vals:
+                st.code(v, language="sql")
+
+        st.markdown('<hr style="margin:12px 0 20px 0">', unsafe_allow_html=True)
+
+        if run_btn:
+            queries = df_raw[query_col].dropna().astype(str)
+            total   = len(queries)
+
+            prog = st.progress(0, text="Normalising queries…")
+
+            work_df = df_raw.copy()
+            norms, fids = [], []
+            for i, q in enumerate(df_raw[query_col].fillna("").astype(str)):
+                norm = normalize(q)
+                norms.append(norm)
+                fids.append(fingerprint_id(norm))
+                if i % 500 == 0:
+                    prog.progress(min(i / total, 1.0),
+                                  text=f"Normalising…  {i:,} / {total:,}")
+
+            work_df["_pattern"]    = norms
+            work_df["_pattern_id"] = fids
+
+            prog.progress(1.0, text="Grouping…")
+
+            work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
+
+            result_df = (
+                work_df
+                .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
+                .reset_index(drop=True)
+            )
+
+            unique_patterns = work_df["_pattern_id"].nunique()
+            prog.empty()
+
+            st.markdown(f"""
+            <div class="stats-row">
+              <div class="stat-card">
+                <div class="stat-label">Total queries</div>
+                <div class="stat-value">{total:,}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Unique patterns</div>
+                <div class="stat-value purple">{unique_patterns:,}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Avg queries / pattern</div>
+                <div class="stat-value">{total / unique_patterns:.1f}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Reduction potential</div>
+                <div class="stat-value green">{(1 - unique_patterns/total)*100:.1f}%</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            dedup_df = (
+                result_df
+                .groupby("_pattern_id", sort=False)[query_col]
+                .first()
+                .reset_index(drop=True)
+                .to_frame(name=query_col)
+            )
+
+            st.markdown(
+                f'<div class="results-header">'
+                f'<span class="results-title">Unique queries</span>'
+                f'<span class="results-count">{total:,} input → {len(dedup_df):,} unique patterns</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.dataframe(
+                dedup_df,
+                use_container_width=True,
+                height=460,
+                column_config={
+                    query_col: st.column_config.TextColumn(query_col, width="large"),
+                },
+            )
+
+            st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+            dl_c1, dl_c2, _ = st.columns([1, 1, 4])
+
+            buf = io.BytesIO()
+            dedup_df.to_parquet(buf, index=False)
+            parquet_bytes = buf.getvalue()
+
+            dl_c1.download_button(
+                "⬇  Download Parquet",
+                data=parquet_bytes,
+                file_name="unique_queries.parquet",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+
+            workspace = "/sessions/loving-magical-cannon/mnt/InsightsHub"
+            if os.path.isdir(workspace):
+                save_path = os.path.join(workspace, "unique_queries.parquet")
+                dedup_df.to_parquet(save_path, index=False)
+                dl_c2.success("Saved → unique_queries.parquet")
+
+            st.markdown(
+                '<p style="font-size:12px;color:#9CA3AF;margin-top:12px">'
+                'Output is the original query text — comments, casing, and filter values are untouched. '
+                'Parquet is used to avoid cell character limits in CSV.'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: Hash Generator  (placeholder)
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "Hash Generator":
+
+    st.markdown("""
+    <div class="page-header">
+      <h1>Hash Generator</h1>
+      <p>Generate cryptographic hashes from text or files.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="coming-soon">
+      <div class="coming-soon-icon">⬢</div>
+      <h2>Coming soon</h2>
+      <p>This tool is under construction.</p>
+    </div>
+    """, unsafe_allow_html=True)
