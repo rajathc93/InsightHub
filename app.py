@@ -1030,7 +1030,7 @@ elif st.session_state.page == "Hash Generator":
 
         # ── Column + output config ────────────────────────────────────────────
         st.markdown("**Which column contains the SQL queries?**")
-        col_c1, col_c2, col_c3 = st.columns([2, 2, 2])
+        col_c1, col_c2 = st.columns([2, 2])
 
         with col_c1:
             hg_query_col = st.selectbox(
@@ -1040,19 +1040,14 @@ elif st.session_state.page == "Hash Generator":
                 key="hg_query_col",
             )
         with col_c2:
-            hg_hash_col = st.text_input(
-                "Hash column name",
-                value="query_hash",
-                help="Name of the new column that will store the SHA-256 hash.",
-                key="hg_hash_col",
-            )
-        with col_c3:
             hg_out_fmt = st.selectbox(
                 "Output format",
                 ["Parquet", "CSV"],
                 key="hg_out_fmt",
                 help="Parquet recommended for large files — no cell character limits.",
             )
+
+        hg_hash_col = "query_hash"  # fixed column name
 
         sample_vals = hg_df[hg_query_col].dropna().astype(str).head(2).tolist()
         with st.expander(f"Preview: first 2 values from '{hg_query_col}'", expanded=True):
