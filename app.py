@@ -1177,14 +1177,12 @@ elif st.session_state.page == "Hash Generator":
             st.dataframe(hg_df.head(5), use_container_width=True)
 
         # ── Column + output config ────────────────────────────────────────────
-        st.markdown("**Which column contains the SQL queries?**")
         col_c1, col_c2 = st.columns([2, 2])
 
         with col_c1:
             hg_query_col = st.selectbox(
-                "SQL query column",
+                "Which column contains the SQL queries?",
                 options=list(hg_df.columns),
-                label_visibility="collapsed",
                 key="hg_query_col",
             )
         with col_c2:
