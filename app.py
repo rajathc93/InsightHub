@@ -680,51 +680,56 @@ if st.session_state.page == "SQL Query Deduplicator":
             st.session_state.dedup_result = None
 
         if run_btn:
-            queries = df_raw[query_col].dropna().astype(str)
-            total   = len(queries)
-
-            prog = st.progress(0, text="Normalising queries…")
-
+            # Filter out null/empty values consistently
             work_df = df_raw.copy()
-            norms, fids = [], []
-            for i, q in enumerate(df_raw[query_col].fillna("").astype(str)):
-                norm = normalize(q)
-                norms.append(norm)
-                fids.append(fingerprint_id(norm))
-                if i % 500 == 0:
-                    prog.progress(min(i / total, 1.0),
-                                  text=f"Normalising…  {i:,} / {total:,}")
+            work_df = work_df[work_df[query_col].notna() & (work_df[query_col].astype(str).str.strip() != "")]
+            work_df = work_df.reset_index(drop=True)
+            total = len(work_df)
 
-            work_df["_pattern"]    = norms
-            work_df["_pattern_id"] = fids
-            prog.progress(1.0, text="Grouping…")
-            work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
+            if total == 0:
+                st.warning("No valid queries found in the selected column. All values are null or empty.")
+            else:
+                prog = st.progress(0, text="Normalising queries…")
 
-            result_df = (
-                work_df
-                .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
-                .reset_index(drop=True)
-            )
+                norms, fids = [], []
+                for i, q in enumerate(work_df[query_col].astype(str)):
+                    norm = normalize(q)
+                    norms.append(norm)
+                    fids.append(fingerprint_id(norm))
+                    if i % 500 == 0:
+                        prog.progress(i / total,
+                                      text=f"Normalising…  {i:,} / {total:,}")
 
-            dedup_df = (
-                result_df
-                .groupby("_pattern_id", sort=False)[query_col]
-                .first()
-                .reset_index(drop=True)
-                .to_frame(name=query_col)
-            )
+                work_df["_pattern"]    = norms
+                work_df["_pattern_id"] = fids
+                prog.progress(1.0, text="Grouping…")
+                work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
 
-            unique_patterns = work_df["_pattern_id"].nunique()
-            prog.empty()
+                result_df = (
+                    work_df
+                    .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
+                    .reset_index(drop=True)
+                )
 
-            # Persist so the output section survives reruns triggered by
-            # widget interactions (e.g. switching to "Write to S3")
-            st.session_state.dedup_result = {
-                "dedup_df":       dedup_df,
-                "total":          total,
-                "unique_patterns": unique_patterns,
-                "query_col":      query_col,
-            }
+                dedup_df = (
+                    result_df
+                    .groupby("_pattern_id", sort=False)[query_col]
+                    .first()
+                    .reset_index(drop=True)
+                    .to_frame(name=query_col)
+                )
+
+                unique_patterns = work_df["_pattern_id"].nunique()
+                prog.empty()
+
+                # Persist so the output section survives reruns triggered by
+                # widget interactions (e.g. switching to "Write to S3")
+                st.session_state.dedup_result = {
+                    "dedup_df":       dedup_df,
+                    "total":          total,
+                    "unique_patterns": unique_patterns,
+                    "query_col":      query_col,
+                }
 
         # ── Render results (from state — survives any rerun) ──────────────────
         if st.session_state.dedup_result is not None:
@@ -733,6 +738,10 @@ if st.session_state.page == "SQL Query Deduplicator":
             total        = res["total"]
             unique_patterns = res["unique_patterns"]
             query_col    = res["query_col"]
+
+            # Safe division for stats
+            avg_per_pattern = total / unique_patterns if unique_patterns > 0 else 0
+            reduction_pct = (1 - unique_patterns / total) * 100 if total > 0 else 0
 
             st.markdown(f"""
             <div class="stats-row">
@@ -746,11 +755,11 @@ if st.session_state.page == "SQL Query Deduplicator":
               </div>
               <div class="stat-card">
                 <div class="stat-label">Avg queries / pattern</div>
-                <div class="stat-value">{total / unique_patterns:.1f}</div>
+                <div class="stat-value">{avg_per_pattern:.1f}</div>
               </div>
               <div class="stat-card">
                 <div class="stat-label">Reduction potential</div>
-                <div class="stat-value green">{(1 - unique_patterns/total)*100:.1f}%</div>
+                <div class="stat-value green">{reduction_pct:.1f}%</div>
               </div>
             </div>
             """, unsafe_allow_html=True)
@@ -788,7 +797,6 @@ if st.session_state.page == "SQL Query Deduplicator":
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "Hash Generator":
     import hashlib
-    import re as _re
 
     st.markdown("""
     <div class="page-header">
@@ -798,17 +806,27 @@ elif st.session_state.page == "Hash Generator":
     """, unsafe_allow_html=True)
 
     # ── Helper functions ──────────────────────────────────────────────────────
-    def _hash_query(query: str) -> Optional[str]:
-        if not isinstance(query, str):
+    def _hash_query(query) -> Optional[str]:
+        """Generate SHA-256 hash for a query. Returns None for null/empty values."""
+        if query is None or (isinstance(query, float) and pd.isna(query)):
             return None
-        normalized = _re.sub(r"\s+", "", query)
+        query_str = str(query).strip()
+        if not query_str:
+            return None
+        normalized = _re.sub(r"\s+", "", query_str)
         return hashlib.sha256(normalized.encode()).hexdigest()
 
-    def _embed_hash_comment(query: str, company: str) -> str:
+    def _embed_hash_comment(query, company: str) -> Optional[str]:
+        """Embed hash as comment. Returns None for null/empty values."""
+        if query is None or (isinstance(query, float) and pd.isna(query)):
+            return None
+        query_str = str(query).strip()
+        if not query_str:
+            return None
         h = _hash_query(query)
         if h is None:
-            return query
-        return f"/* {company}::{h} */\n{query}"
+            return None
+        return f"/* {company}::{h} */\n{query_str}"
 
     # ── Config ────────────────────────────────────────────────────────────────
     st.markdown("**Configuration**")
@@ -1090,28 +1108,33 @@ elif st.session_state.page == "Hash Generator":
             hashes, commented = [], []
             total = len(out_df)
 
-            for i, q in enumerate(out_df[hg_query_col].astype(str)):
-                hashes.append(_hash_query(q))
-                commented.append(_embed_hash_comment(q, company))
-                if i % 500 == 0:
-                    prog.progress(min(i / total, 1.0), text=f"Hashing…  {i:,} / {total:,}")
+            if total == 0:
+                st.warning("No data to process.")
+                prog.empty()
+            else:
+                # Iterate over raw values to properly detect nulls
+                for i, q in enumerate(out_df[hg_query_col]):
+                    hashes.append(_hash_query(q))
+                    commented.append(_embed_hash_comment(q, company))
+                    if i % 500 == 0:
+                        prog.progress(i / total, text=f"Hashing…  {i:,} / {total:,}")
 
-            # Original column is never modified — two new columns are added
-            out_df[hg_hash_col] = hashes
-            out_df[hashed_col]  = commented
-            prog.progress(1.0, text="Done")
-            prog.empty()
+                # Original column is never modified — two new columns are added
+                out_df[hg_hash_col] = hashes
+                out_df[hashed_col]  = commented
+                prog.progress(1.0, text="Done")
+                prog.empty()
 
-            # Persist so output section survives reruns (e.g. switching to "Write to S3")
-            st.session_state.hg_result = {
-                "out_df":     out_df,
-                "total":      total,
-                "company":    company,
-                "query_col":  hg_query_col,
-                "hash_col":   hg_hash_col,
-                "hashed_col": hashed_col,
-                "out_fmt":    hg_out_fmt,
-            }
+                # Persist so output section survives reruns (e.g. switching to "Write to S3")
+                st.session_state.hg_result = {
+                    "out_df":     out_df,
+                    "total":      total,
+                    "company":    company,
+                    "query_col":  hg_query_col,
+                    "hash_col":   hg_hash_col,
+                    "hashed_col": hashed_col,
+                    "out_fmt":    hg_out_fmt,
+                }
 
         # ── Render results (from state — survives any rerun) ──────────────────
         if st.session_state.hg_result is not None:
