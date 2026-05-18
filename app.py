@@ -267,6 +267,18 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
+    # Credential status badge
+    if aws_key and aws_secret:
+        st.markdown(
+            '<p style="font-size:11.5px;color:#16A34A;margin:6px 0 0 16px">● S3 credentials loaded</p>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<p style="font-size:11.5px;color:#F59E0B;margin:6px 0 0 16px">● No S3 credentials — using machine defaults</p>',
+            unsafe_allow_html=True,
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SQL Query Deduplicator
@@ -656,24 +668,19 @@ elif st.session_state.page == "Hash Generator":
                     matched = ["s3://" + bare]
                 else:
                     # 1. Try glob first
-                    try:
-                        matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
-                                   if not f.endswith("/") and f.lower().endswith(exts)]
-                    except Exception:
-                        matched = []
+                    matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
+                               if not f.endswith("/") and f.lower().endswith(exts)]
                     # 2. Fall back to regex
                     if not matched:
-                        try:
-                            all_files = ["s3://" + f for f in fs.find(bare)
-                                         if not f.endswith("/") and f.lower().endswith(exts)]
-                            rx = _re2.compile(hg_s3_pattern)
-                            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-                        except Exception:
-                            matched = []
+                        all_files = ["s3://" + f for f in fs.find(bare)
+                                     if not f.endswith("/") and f.lower().endswith(exts)]
+                        rx = _re2.compile(hg_s3_pattern)
+                        matched = [f for f in all_files if rx.search(f.split("/")[-1])]
                     matched = sorted(matched)
 
                 if not matched:
-                    st.warning("No files matched. Check your path and pattern.")
+                    st.warning(f"No files matched `{hg_s3_pattern}` under `{hg_s3_prefix}`. "
+                               f"Check the path, pattern, and that credentials have access.")
                 else:
                     st.markdown(
                         f'<div class="results-header">'
@@ -700,7 +707,10 @@ elif st.session_state.page == "Hash Generator":
             except ImportError:
                 st.error("s3fs is not installed. Run: pip install s3fs")
             except Exception as e:
-                st.error(f"S3 error: {e}")
+                err = str(e)
+                st.error(f"S3 error: {err}")
+                if any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "ExpiredToken", "InvalidToken", "NoCredentialProviders")):
+                    st.info("Credentials are missing or expired. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
 
     hg_df = st.session_state.hg_df
 
