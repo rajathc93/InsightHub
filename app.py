@@ -452,6 +452,7 @@ if st.session_state.page == "SQL Query Deduplicator":
         st.session_state.last_source = source
     if st.session_state.last_source != source:
         st.session_state.df_raw = None
+        st.session_state.dedup_result = None
         st.session_state.last_source = source
 
     if source == "Local file":
@@ -468,6 +469,7 @@ if st.session_state.page == "SQL Query Deduplicator":
             st.session_state.dedup_last_local_mode = local_mode
         if st.session_state.dedup_last_local_mode != local_mode:
             st.session_state.df_raw = None
+            st.session_state.dedup_result = None
             st.session_state.dedup_last_local_mode = local_mode
 
         if local_mode == "Upload file":
@@ -484,6 +486,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                     st.session_state.df_raw = (
                         pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
                     )
+                    st.session_state.dedup_result = None
                 except Exception as e:
                     st.error(f"Could not read file: {e}")
 
@@ -543,6 +546,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                                     )
                                     frames.append(_read_local_file(fpath, file_format))
                                 st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                                st.session_state.dedup_result = None
                                 prog.empty()
                             except Exception as e:
                                 st.error(f"Could not read files: {e}")
@@ -608,6 +612,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                                 )
                                 frames.append(_read_s3_file(fpath, fmt, so))
                             st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                            st.session_state.dedup_result = None
                             prog.empty()
 
                 except ImportError:
@@ -824,12 +829,11 @@ elif st.session_state.page == "Hash Generator":
 
     hg_fmt = st.selectbox("Input format", ["Auto-detect", "CSV", "Parquet"], key="hg_fmt")
 
-    if "hg_df" not in st.session_state:
-        st.session_state.hg_df = None
     if "hg_last_source" not in st.session_state:
         st.session_state.hg_last_source = hg_source
     if st.session_state.hg_last_source != hg_source:
         st.session_state.hg_df = None
+        st.session_state.hg_result = None
         st.session_state.hg_last_source = hg_source
 
     if hg_source == "Local file":
@@ -846,6 +850,7 @@ elif st.session_state.page == "Hash Generator":
             st.session_state.hg_last_local_mode = hg_local_mode
         if st.session_state.hg_last_local_mode != hg_local_mode:
             st.session_state.hg_df = None
+            st.session_state.hg_result = None
             st.session_state.hg_last_local_mode = hg_local_mode
 
         if hg_local_mode == "Upload file":
@@ -862,6 +867,7 @@ elif st.session_state.page == "Hash Generator":
                     st.session_state.hg_df = (
                         pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
                     )
+                    st.session_state.hg_result = None
                 except Exception as e:
                     st.error(f"Could not read file: {e}")
 
@@ -921,6 +927,7 @@ elif st.session_state.page == "Hash Generator":
                                     )
                                     frames.append(_read_local_file(fpath, hg_fmt))
                                 st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                                st.session_state.hg_result = None
                                 prog.empty()
                             except Exception as e:
                                 st.error(f"Could not read files: {e}")
@@ -988,6 +995,7 @@ elif st.session_state.page == "Hash Generator":
                                 )
                                 frames.append(_read_s3_file(fpath, fmt, so))
                             st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                            st.session_state.hg_result = None
                             prog.empty()
 
                 except ImportError:
@@ -1065,8 +1073,10 @@ elif st.session_state.page == "Hash Generator":
         st.markdown('<hr style="margin:4px 0 16px 0">', unsafe_allow_html=True)
 
         # Clear saved result when user changes query column or hash column name
-        if (st.session_state.hg_result is not None and
-                st.session_state.hg_result.get("query_col") != hg_query_col):
+        if st.session_state.hg_result is not None and (
+            st.session_state.hg_result.get("query_col") != hg_query_col or
+            st.session_state.hg_result.get("hash_col")  != hg_hash_col
+        ):
             st.session_state.hg_result = None
 
         hg_run = st.button("▶  Generate hashes", type="primary")
