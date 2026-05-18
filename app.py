@@ -384,7 +384,12 @@ if st.session_state.page == "SQL Query Deduplicator":
                 so    = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
                 fmt   = file_format
                 if fmt == "Auto-detect":
-                    fmt = "Parquet" if s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
+                    # Only resolve from path when it points to a specific file
+                    if s3_prefix.lower().endswith((".parquet", ".pq")):
+                        fmt = "Parquet"
+                    elif s3_prefix.lower().endswith(".csv"):
+                        fmt = "CSV"
+                    # else: keep "Auto-detect" so both .csv and .parquet are accepted
 
                 matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
 
@@ -665,7 +670,12 @@ elif st.session_state.page == "Hash Generator":
                 so  = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
                 fmt = hg_fmt
                 if fmt == "Auto-detect":
-                    fmt = "Parquet" if hg_s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
+                    # Only resolve from path when it points to a specific file
+                    if hg_s3_prefix.lower().endswith((".parquet", ".pq")):
+                        fmt = "Parquet"
+                    elif hg_s3_prefix.lower().endswith(".csv"):
+                        fmt = "CSV"
+                    # else: keep "Auto-detect" so both .csv and .parquet are accepted
 
                 bare = hg_s3_prefix.replace("s3://", "").rstrip("/")
                 ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
