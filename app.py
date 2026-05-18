@@ -216,7 +216,7 @@ with st.sidebar:
         else:
             # Inactive: real button styled via CSS to look like a nav item
             if st.button(p["id"], key=f"nav_{p['id']}",
-                         width='stretch'):
+                         use_container_width=True):
                 st.session_state.page = p["id"]
                 st.rerun()
 
@@ -410,7 +410,7 @@ if st.session_state.page == "SQL Query Deduplicator":
 
         info_c, clear_c = st.columns([8, 1])
         with clear_c:
-            if st.button("✕ Clear", width='stretch'):
+            if st.button("✕ Clear", use_container_width=True):
                 st.session_state.df_raw = None
                 st.rerun()
         with info_c:
@@ -446,7 +446,7 @@ if st.session_state.page == "SQL Query Deduplicator":
             )
 
         with sel_c3:
-            run_btn = st.button("▶  Run analysis", type="primary", width='stretch')
+            run_btn = st.button("▶  Run analysis", type="primary", use_container_width=True)
 
         sample_vals = df_raw[query_col].dropna().astype(str).head(3).tolist()
         with st.expander(f"Preview: first 3 values from '{query_col}'", expanded=True):
@@ -708,7 +708,7 @@ elif st.session_state.page == "Hash Generator":
 
         info_c, clear_c = st.columns([8, 1])
         with clear_c:
-            if st.button("✕ Clear", key="hg_clear", width='stretch'):
+            if st.button("✕ Clear", key="hg_clear", use_container_width=True):
                 st.session_state.hg_df = None
                 st.rerun()
         with info_c:
