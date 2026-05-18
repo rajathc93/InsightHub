@@ -424,7 +424,7 @@ if st.session_state.page == "SQL Query Deduplicator":
         )
 
         with st.expander("Preview data (first 5 rows)", expanded=False):
-            st.dataframe(df_raw.head(5), width='stretch')
+            st.dataframe(df_raw.head(5), use_container_width=True)
 
         st.markdown("**Which column contains the SQL queries?**")
         sel_c1, sel_c2, sel_c3 = st.columns([2, 2, 2])
@@ -526,7 +526,7 @@ if st.session_state.page == "SQL Query Deduplicator":
 
             st.dataframe(
                 dedup_df,
-                width='stretch',
+                use_container_width=True,
                 height=460,
                 column_config={
                     query_col: st.column_config.TextColumn(query_col, width="large"),
@@ -722,7 +722,7 @@ elif st.session_state.page == "Hash Generator":
             )
 
         with st.expander("Preview data (first 5 rows)", expanded=False):
-            st.dataframe(hg_df.head(5), width='stretch')
+            st.dataframe(hg_df.head(5), use_container_width=True)
 
         # ── Column + output config ────────────────────────────────────────────
         st.markdown("**Which column contains the SQL queries?**")
@@ -817,7 +817,7 @@ elif st.session_state.page == "Hash Generator":
                 f'</div>',
                 unsafe_allow_html=True,
             )
-            st.dataframe(out_df.head(5), width='stretch')
+            st.dataframe(out_df.head(5), use_container_width=True)
 
             # ── Output ────────────────────────────────────────────────────────
             st.markdown('<hr style="margin:16px 0">', unsafe_allow_html=True)
