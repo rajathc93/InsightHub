@@ -202,6 +202,12 @@ def _output_widget(df: pd.DataFrame, default_filename: str,
             if not s3_out:
                 st.warning("Enter an S3 output path first.")
             else:
+                # Auto-append the correct extension if the path has none
+                _ext = ".parquet" if fmt == "Parquet" else ".csv"
+                if not s3_out.rstrip("/").lower().endswith((".parquet", ".pq", ".csv")):
+                    s3_out_final = s3_out.rstrip("/") + _ext
+                else:
+                    s3_out_final = s3_out
                 try:
                     import s3fs
                     kw = {}
@@ -209,13 +215,17 @@ def _output_widget(df: pd.DataFrame, default_filename: str,
                     if aws_secret: kw["secret"] = aws_secret
                     if aws_token:  kw["token"]  = aws_token
                     fs = s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
-                    with fs.open(s3_out, "wb") as f:
-                        f.write(file_bytes)
-                    st.success(f"Written → `{s3_out}`")
+                    size_mb = len(file_bytes) / (1024 * 1024)
+                    with st.spinner(f"Uploading {size_mb:.1f} MB to S3…"):
+                        with fs.open(s3_out_final, "wb") as f:
+                            f.write(file_bytes)
+                    st.success(f"✅ Written → `{s3_out_final}`  ({size_mb:.1f} MB)")
                 except ImportError:
                     st.error("s3fs is not installed. Run: pip install s3fs")
                 except Exception as e:
-                    st.error(f"S3 write failed: {e}")
+                    err = str(e)
+                    st.error(f"S3 write failed: {err}")
+                    _s3_error_hints(err)
 
     if note:
         st.markdown(
@@ -479,16 +489,25 @@ if st.session_state.page == "SQL Query Deduplicator":
                 label_visibility="collapsed",
             )
             if uploaded:
-                fmt = file_format
-                if fmt == "Auto-detect":
-                    fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-                try:
-                    st.session_state.df_raw = (
-                        pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
-                    )
-                    st.session_state.dedup_result = None
-                except Exception as e:
-                    st.error(f"Could not read file: {e}")
+                # file_uploader returns the file on EVERY rerun while the file
+                # is still present.  Only reload (and clear results) when the
+                # user actually picks a different file.
+                _dedup_fid = getattr(uploaded, "file_id", uploaded.name)
+                if st.session_state.get("dedup_uploaded_file_id") != _dedup_fid:
+                    fmt = file_format
+                    if fmt == "Auto-detect":
+                        fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+                    try:
+                        st.session_state.df_raw = (
+                            pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
+                        )
+                        st.session_state.dedup_result = None
+                        st.session_state.dedup_uploaded_file_id = _dedup_fid
+                    except Exception as e:
+                        st.error(f"Could not read file: {e}")
+            else:
+                # File was removed from the uploader — clear the stale id
+                st.session_state.dedup_uploaded_file_id = None
 
         else:  # Local path
             lc1, lc2 = st.columns([2, 1])
@@ -860,16 +879,25 @@ elif st.session_state.page == "Hash Generator":
                 key="hg_upload",
             )
             if hg_uploaded:
-                fmt = hg_fmt
-                if fmt == "Auto-detect":
-                    fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-                try:
-                    st.session_state.hg_df = (
-                        pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
-                    )
-                    st.session_state.hg_result = None
-                except Exception as e:
-                    st.error(f"Could not read file: {e}")
+                # file_uploader returns the file on EVERY rerun while the file
+                # is still present.  Only reload (and clear results) when the
+                # user actually picks a different file.
+                _hg_fid = getattr(hg_uploaded, "file_id", hg_uploaded.name)
+                if st.session_state.get("hg_uploaded_file_id") != _hg_fid:
+                    fmt = hg_fmt
+                    if fmt == "Auto-detect":
+                        fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+                    try:
+                        st.session_state.hg_df = (
+                            pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
+                        )
+                        st.session_state.hg_result = None
+                        st.session_state.hg_uploaded_file_id = _hg_fid
+                    except Exception as e:
+                        st.error(f"Could not read file: {e}")
+            else:
+                # File was removed from the uploader — clear the stale id
+                st.session_state.hg_uploaded_file_id = None
 
         else:  # Local path
             hg_lc1, hg_lc2 = st.columns([2, 1])
@@ -1030,7 +1058,7 @@ elif st.session_state.page == "Hash Generator":
 
         # ── Column + output config ────────────────────────────────────────────
         st.markdown("**Which column contains the SQL queries?**")
-        col_c1, col_c2, col_c3 = st.columns([2, 2, 2])
+        col_c1, col_c2 = st.columns([2, 2])
 
         with col_c1:
             hg_query_col = st.selectbox(
@@ -1040,13 +1068,6 @@ elif st.session_state.page == "Hash Generator":
                 key="hg_query_col",
             )
         with col_c2:
-            hg_hash_col = st.text_input(
-                "Hash column name",
-                value="query_hash",
-                help="Name of the new column that will store the SHA-256 hash.",
-                key="hg_hash_col",
-            )
-        with col_c3:
             hg_out_fmt = st.selectbox(
                 "Output format",
                 ["Parquet", "CSV"],
@@ -1054,12 +1075,14 @@ elif st.session_state.page == "Hash Generator":
                 help="Parquet recommended for large files — no cell character limits.",
             )
 
+        hg_hash_col = "query_hash"  # fixed column name
+
         sample_vals = hg_df[hg_query_col].dropna().astype(str).head(2).tolist()
         with st.expander(f"Preview: first 2 values from '{hg_query_col}'", expanded=True):
             for v in sample_vals:
                 st.code(v, language="sql")
 
-        hashed_col = f"{hg_query_col}_hashed"
+        hashed_col = "hashed_query"
         st.markdown(
             f'<p style="font-size:12.5px;color:#6B7280;margin:8px 0 16px 0">'
             f'Two new columns will be added — <code>{hashed_col}</code> (original query with '
@@ -1083,7 +1106,7 @@ elif st.session_state.page == "Hash Generator":
 
         if hg_run:
             company    = company_name.strip() or "company"
-            hashed_col = f"{hg_query_col}_hashed"
+            hashed_col = "hashed_query"
             prog = st.progress(0, text="Generating hashes…")
 
             out_df = hg_df.copy()
