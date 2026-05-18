@@ -87,6 +87,48 @@ def _read_s3_file(fpath: str, fmt: str, storage_options) -> pd.DataFrame:
     return pd.read_parquet(fpath, storage_options=storage_options or None)
 
 
+def _resolve_local_files(directory: str, pattern: str, fmt: str) -> list[str]:
+    """
+    Return a sorted list of local file paths under *directory* matching *pattern*.
+
+    pattern — glob (query_history*, *.parquet, 2024-*) or empty string.
+    Empty pattern → every file directly in the directory.
+    fmt     — "CSV" | "Parquet" | "Auto-detect"
+    """
+    import glob as _glob
+
+    ext_map = {
+        "CSV":     (".csv",),
+        "Parquet": (".parquet", ".pq"),
+    }
+    exts = ext_map.get(fmt)  # None when Auto-detect → accept all files
+
+    def _keep(path: str) -> bool:
+        if not os.path.isfile(path):
+            return False
+        if exts is None:
+            return True
+        return path.lower().endswith(exts)
+
+    if not pattern:
+        candidates = _glob.glob(os.path.join(directory, "*"))
+    else:
+        candidates = _glob.glob(os.path.join(directory, pattern))
+        # If glob found nothing, also try a case-insensitive / recursive pass
+        if not candidates:
+            candidates = _glob.glob(os.path.join(directory, "**", pattern), recursive=True)
+
+    return sorted(p for p in candidates if _keep(p))
+
+
+def _read_local_file(fpath: str, fmt: str) -> pd.DataFrame:
+    """Read a local file as a DataFrame, auto-detecting CSV vs Parquet."""
+    use_csv = fmt == "CSV" or (fmt == "Auto-detect" and fpath.lower().endswith(".csv"))
+    if use_csv:
+        return pd.read_csv(fpath)
+    return pd.read_parquet(fpath)
+
+
 def _s3_error_hints(err: str):
     """Render helpful contextual hints beneath an S3 error message."""
     if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired",
@@ -407,19 +449,97 @@ if st.session_state.page == "SQL Query Deduplicator":
         st.session_state.last_source = source
 
     if source == "Local file":
-        uploaded = st.file_uploader(
-            "Upload a CSV or Parquet file",
-            type=["csv", "parquet", "pq"],
+        local_mode = st.radio(
+            "local_mode",
+            ["Upload file", "Local path"],
+            horizontal=True,
             label_visibility="collapsed",
+            key="dedup_local_mode",
         )
-        if uploaded:
-            fmt = file_format
-            if fmt == "Auto-detect":
-                fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-            try:
-                st.session_state.df_raw = pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
-            except Exception as e:
-                st.error(f"Could not read file: {e}")
+
+        # Reset data when sub-mode changes
+        if "dedup_last_local_mode" not in st.session_state:
+            st.session_state.dedup_last_local_mode = local_mode
+        if st.session_state.dedup_last_local_mode != local_mode:
+            st.session_state.df_raw = None
+            st.session_state.dedup_last_local_mode = local_mode
+
+        if local_mode == "Upload file":
+            uploaded = st.file_uploader(
+                "Upload a CSV or Parquet file",
+                type=["csv", "parquet", "pq"],
+                label_visibility="collapsed",
+            )
+            if uploaded:
+                fmt = file_format
+                if fmt == "Auto-detect":
+                    fmt = "Parquet" if uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+                try:
+                    st.session_state.df_raw = (
+                        pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
+                    )
+                except Exception as e:
+                    st.error(f"Could not read file: {e}")
+
+        else:  # Local path
+            lc1, lc2 = st.columns([2, 1])
+            with lc1:
+                local_dir = st.text_input(
+                    "Folder path",
+                    placeholder="/path/to/your/folder",
+                    help="Absolute path to the folder containing your data files.",
+                    key="dedup_local_dir",
+                )
+            with lc2:
+                local_pattern = st.text_input(
+                    "File pattern",
+                    placeholder="e.g. query_history*",
+                    help="Glob pattern (query_history*, *.parquet, 2024-*). Leave blank to list all files.",
+                    key="dedup_local_pattern",
+                )
+
+            lb1, lb2, _ = st.columns([1, 1, 4])
+            local_list_btn = lb1.button("List files", type="secondary", key="dedup_local_list")
+            local_load_btn = lb2.button("Load files", type="primary", key="dedup_local_load")
+
+            if local_list_btn or local_load_btn:
+                if not local_dir:
+                    st.warning("Enter a folder path first.")
+                elif not os.path.isdir(local_dir):
+                    st.error(f"Folder not found: `{local_dir}`")
+                else:
+                    matched_local = _resolve_local_files(local_dir, local_pattern, file_format)
+                    if not matched_local:
+                        st.warning(
+                            f"No files matched `{local_pattern or '*'}` in `{local_dir}`. "
+                            "Check the path and pattern."
+                        )
+                    else:
+                        st.markdown(
+                            f'<div class="results-header">'
+                            f'<span class="results-title">Matched files</span>'
+                            f'<span class="results-count">'
+                            f'{len(matched_local)} result{"s" if len(matched_local) != 1 else ""}'
+                            f'</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        for f in matched_local:
+                            st.markdown(f'<div class="file-list-item">{f}</div>',
+                                        unsafe_allow_html=True)
+                        if local_load_btn:
+                            try:
+                                frames = []
+                                prog = st.progress(0, text="Loading files…")
+                                for i, fpath in enumerate(matched_local):
+                                    prog.progress(
+                                        (i + 1) / len(matched_local),
+                                        text=f"Reading {os.path.basename(fpath)}  ({i+1}/{len(matched_local)})",
+                                    )
+                                    frames.append(_read_local_file(fpath, file_format))
+                                st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                                prog.empty()
+                            except Exception as e:
+                                st.error(f"Could not read files: {e}")
 
     else:  # S3
         c1, c2 = st.columns([2, 1])
@@ -686,19 +806,97 @@ elif st.session_state.page == "Hash Generator":
         st.session_state.hg_last_source = hg_source
 
     if hg_source == "Local file":
-        hg_uploaded = st.file_uploader(
-            "Upload a CSV or Parquet file",
-            type=["csv", "parquet", "pq"],
-            key="hg_upload",
+        hg_local_mode = st.radio(
+            "hg_local_mode",
+            ["Upload file", "Local path"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="hg_local_mode",
         )
-        if hg_uploaded:
-            fmt = hg_fmt
-            if fmt == "Auto-detect":
-                fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-            try:
-                st.session_state.hg_df = pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
-            except Exception as e:
-                st.error(f"Could not read file: {e}")
+
+        # Reset data when sub-mode changes
+        if "hg_last_local_mode" not in st.session_state:
+            st.session_state.hg_last_local_mode = hg_local_mode
+        if st.session_state.hg_last_local_mode != hg_local_mode:
+            st.session_state.hg_df = None
+            st.session_state.hg_last_local_mode = hg_local_mode
+
+        if hg_local_mode == "Upload file":
+            hg_uploaded = st.file_uploader(
+                "Upload a CSV or Parquet file",
+                type=["csv", "parquet", "pq"],
+                key="hg_upload",
+            )
+            if hg_uploaded:
+                fmt = hg_fmt
+                if fmt == "Auto-detect":
+                    fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+                try:
+                    st.session_state.hg_df = (
+                        pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
+                    )
+                except Exception as e:
+                    st.error(f"Could not read file: {e}")
+
+        else:  # Local path
+            hg_lc1, hg_lc2 = st.columns([2, 1])
+            with hg_lc1:
+                hg_local_dir = st.text_input(
+                    "Folder path",
+                    placeholder="/path/to/your/folder",
+                    help="Absolute path to the folder containing your data files.",
+                    key="hg_local_dir",
+                )
+            with hg_lc2:
+                hg_local_pattern = st.text_input(
+                    "File pattern",
+                    placeholder="e.g. *.parquet",
+                    help="Glob pattern (*.parquet, query_history*, 2024-*). Leave blank to list all files.",
+                    key="hg_local_pattern",
+                )
+
+            hg_lb1, hg_lb2, _ = st.columns([1, 1, 4])
+            hg_local_list_btn = hg_lb1.button("List files", type="secondary", key="hg_local_list")
+            hg_local_load_btn = hg_lb2.button("Load files", type="primary", key="hg_local_load")
+
+            if hg_local_list_btn or hg_local_load_btn:
+                if not hg_local_dir:
+                    st.warning("Enter a folder path first.")
+                elif not os.path.isdir(hg_local_dir):
+                    st.error(f"Folder not found: `{hg_local_dir}`")
+                else:
+                    hg_matched_local = _resolve_local_files(hg_local_dir, hg_local_pattern, hg_fmt)
+                    if not hg_matched_local:
+                        st.warning(
+                            f"No files matched `{hg_local_pattern or '*'}` in `{hg_local_dir}`. "
+                            "Check the path and pattern."
+                        )
+                    else:
+                        st.markdown(
+                            f'<div class="results-header">'
+                            f'<span class="results-title">Matched files</span>'
+                            f'<span class="results-count">'
+                            f'{len(hg_matched_local)} result{"s" if len(hg_matched_local) != 1 else ""}'
+                            f'</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        for f in hg_matched_local:
+                            st.markdown(f'<div class="file-list-item">{f}</div>',
+                                        unsafe_allow_html=True)
+                        if hg_local_load_btn:
+                            try:
+                                frames = []
+                                prog = st.progress(0, text="Loading files…")
+                                for i, fpath in enumerate(hg_matched_local):
+                                    prog.progress(
+                                        (i + 1) / len(hg_matched_local),
+                                        text=f"Reading {os.path.basename(fpath)}  ({i+1}/{len(hg_matched_local)})",
+                                    )
+                                    frames.append(_read_local_file(fpath, hg_fmt))
+                                st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                                prog.empty()
+                            except Exception as e:
+                                st.error(f"Could not read files: {e}")
 
     else:  # S3
         hg_c1, hg_c2 = st.columns([2, 1])
@@ -825,10 +1023,14 @@ elif st.session_state.page == "Hash Generator":
             for v in sample_vals:
                 st.code(v, language="sql")
 
+        hashed_col = f"{hg_query_col}_hashed"
         st.markdown(
             f'<p style="font-size:12.5px;color:#6B7280;margin:8px 0 16px 0">'
-            f'Each query will get a <code>/* {company_name or "company"}::&lt;sha256&gt; */</code> '
-            f'comment prepended and a new <code>{hg_hash_col}</code> column added.</p>',
+            f'Two new columns will be added — <code>{hashed_col}</code> (original query with '
+            f'<code>/* {company_name or "company"}::&lt;sha256&gt; */</code> prepended) and '
+            f'<code>{hg_hash_col}</code> (bare SHA-256 hex). '
+            f'The original <code>{hg_query_col}</code> column is left untouched. '
+            f'Any existing comments in the query are preserved.</p>',
             unsafe_allow_html=True,
         )
 
@@ -838,6 +1040,7 @@ elif st.session_state.page == "Hash Generator":
 
         if hg_run:
             company = company_name.strip() or "company"
+            hashed_col = f"{hg_query_col}_hashed"
             prog = st.progress(0, text="Generating hashes…")
 
             out_df = hg_df.copy()
@@ -850,8 +1053,9 @@ elif st.session_state.page == "Hash Generator":
                 if i % 500 == 0:
                     prog.progress(min(i / total, 1.0), text=f"Hashing…  {i:,} / {total:,}")
 
-            out_df[hg_hash_col]    = hashes
-            out_df[hg_query_col]   = commented
+            # Original column is never modified — two new columns are added
+            out_df[hg_hash_col] = hashes
+            out_df[hashed_col]  = commented
             prog.progress(1.0, text="Done")
             prog.empty()
 
