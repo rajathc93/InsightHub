@@ -346,24 +346,18 @@ if st.session_state.page == "SQL Query Deduplicator":
             if not pattern:
                 return ["s3://" + bare]
 
-            # 1. Try glob directly — works for *.parquet, 2024-*, etc.
-            try:
-                glob_results = ["s3://" + f for f in fs.glob(f"{bare}/{pattern}")
-                                if not f.endswith("/") and f.lower().endswith(exts)]
-                if glob_results:
-                    return sorted(glob_results)
-            except Exception:
-                pass
+            # 1. Try glob directly — works for query_history*, *.parquet, 2024-*, etc.
+            glob_results = ["s3://" + f for f in fs.glob(f"{bare}/{pattern}")
+                            if not f.endswith("/") and f.lower().endswith(exts)]
+            if glob_results:
+                return sorted(glob_results)
 
             # 2. Fall back: find all files then apply as Python regex
-            try:
-                all_files = ["s3://" + f for f in fs.find(bare)
-                             if not f.endswith("/") and f.lower().endswith(exts)]
-                rx = _re.compile(pattern)
-                matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-                return sorted(matched)
-            except Exception:
-                return []
+            all_files = ["s3://" + f for f in fs.find(bare)
+                         if not f.endswith("/") and f.lower().endswith(exts)]
+            rx = _re.compile(pattern)
+            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+            return sorted(matched)
 
         if (list_btn or load_s3) and s3_prefix:
             try:
@@ -377,7 +371,8 @@ if st.session_state.page == "SQL Query Deduplicator":
                 matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
 
                 if not matched_files:
-                    st.warning("No files matched. Check your path and pattern.")
+                    st.warning(f"No files matched `{s3_pattern or ''}` under `{s3_prefix}`. "
+                               f"Check the path, pattern, and that your credentials have access.")
                 else:
                     st.markdown(
                         f'<div class="results-header">'
@@ -404,7 +399,10 @@ if st.session_state.page == "SQL Query Deduplicator":
             except ImportError:
                 st.error("s3fs is not installed. Run: pip install s3fs")
             except Exception as e:
-                st.error(f"S3 error: {e}")
+                err = str(e)
+                st.error(f"S3 error: {err}")
+                if any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "ExpiredToken", "InvalidToken")):
+                    st.info("Credentials appear expired or invalid. Enter fresh credentials in the **S3 credentials** expander in the sidebar.")
 
     # ── Data loaded — column picker + run ─────────────────────────────────────
     df_raw = st.session_state.df_raw
