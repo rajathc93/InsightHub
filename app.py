@@ -37,14 +37,19 @@ def _resolve_files(fs, prefix: str, pattern: str, fmt: str) -> list[str]:
     """
     bare = prefix.replace("s3://", "").rstrip("/")
     ext_map = {
-        "CSV":         (".csv",),
-        "Parquet":     (".parquet", ".pq"),
-        "Auto-detect": (".csv", ".parquet", ".pq"),
+        "CSV":     (".csv",),
+        "Parquet": (".parquet", ".pq", ".parquet.snappy", ".parquet.gz",
+                    ".parquet.zstd", ".parquet.brotli", ".parquet.lz4"),
     }
-    exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+    exts = ext_map.get(fmt)  # None when Auto-detect → no extension filter
 
     def _keep(path: str) -> bool:
-        return not path.endswith("/") and path.lower().endswith(exts)
+        if path.endswith("/"):
+            return False
+        # Auto-detect: accept every file regardless of extension
+        if exts is None:
+            return True
+        return path.lower().endswith(exts)
 
     if not pattern:
         # detail=False → plain path strings (not dicts, which is the default in
@@ -71,7 +76,8 @@ def _resolve_files(fs, prefix: str, pattern: str, fmt: str) -> list[str]:
 def _read_s3_file(fpath: str, fmt: str, storage_options) -> pd.DataFrame:
     """
     Read one S3 file into a DataFrame.
-    When fmt is "Auto-detect", format is inferred from the file extension.
+    When fmt is "Auto-detect", CSV is used only when the extension is .csv;
+    everything else (including extensionless Spark/Hive files) is read as Parquet.
     """
     use_csv = fmt == "CSV" or (
         fmt == "Auto-detect" and fpath.lower().endswith(".csv")
