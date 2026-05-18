@@ -4,12 +4,105 @@ InsightsHub — multi-tool analytics app
 
 import io
 import os
+import re as _re
 from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
 from normalizer import normalize, fingerprint_id
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# S3 helpers — module-level so every page can reuse them
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_s3fs(key: str, secret: str, token: str):
+    """Create an S3FileSystem, injecting explicit credentials only when present."""
+    import s3fs as _s3fs
+    kw: dict = {}
+    if key:    kw["key"]    = key
+    if secret: kw["secret"] = secret
+    if token:  kw["token"]  = token
+    return _s3fs.S3FileSystem(**kw) if kw else _s3fs.S3FileSystem(anon=False)
+
+
+def _resolve_files(fs, prefix: str, pattern: str, fmt: str) -> list[str]:
+    """
+    Return a sorted list of s3:// paths under *prefix* that match *pattern*.
+
+    pattern — glob (query_history*, *.parquet) OR Python regex OR empty string.
+    Empty pattern → list everything directly in the folder (non-recursive).
+    fmt     — "CSV" | "Parquet" | "Auto-detect"
+    """
+    bare = prefix.replace("s3://", "").rstrip("/")
+    ext_map = {
+        "CSV":         (".csv",),
+        "Parquet":     (".parquet", ".pq"),
+        "Auto-detect": (".csv", ".parquet", ".pq"),
+    }
+    exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+
+    def _keep(path: str) -> bool:
+        return not path.endswith("/") and path.lower().endswith(exts)
+
+    if not pattern:
+        # detail=False → plain path strings (not dicts, which is the default in
+        # s3fs 2024+ and causes AttributeError with .endswith())
+        raw = fs.ls(bare, detail=False)
+        return sorted("s3://" + f for f in raw if _keep(f))
+
+    # 1. Glob first — handles *, ?.parquet, query_history*, 2024-*, etc.
+    glob_hits = ["s3://" + f
+                 for f in fs.glob(f"{bare}/{pattern}")
+                 if _keep(f)]
+    if glob_hits:
+        return sorted(glob_hits)
+
+    # 2. Fallback: treat pattern as Python regex (only when it compiles cleanly)
+    try:
+        rx = _re.compile(pattern)
+    except _re.error:
+        return []   # invalid as both glob and regex → nothing matched
+    all_files = ["s3://" + f for f in fs.find(bare) if _keep(f)]
+    return sorted(f for f in all_files if rx.search(f.split("/")[-1]))
+
+
+def _read_s3_file(fpath: str, fmt: str, storage_options) -> pd.DataFrame:
+    """
+    Read one S3 file into a DataFrame.
+    When fmt is "Auto-detect", format is inferred from the file extension.
+    """
+    use_csv = fmt == "CSV" or (
+        fmt == "Auto-detect" and fpath.lower().endswith(".csv")
+    )
+    if use_csv:
+        return pd.read_csv(fpath, storage_options=storage_options or None)
+    return pd.read_parquet(fpath, storage_options=storage_options or None)
+
+
+def _s3_error_hints(err: str):
+    """Render helpful contextual hints beneath an S3 error message."""
+    if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired",
+                               "Request has expired", "Token has expired")):
+        st.warning(
+            "⏱ **Your AWS session token has expired.** "
+            "Generate new temporary credentials and paste them into the "
+            "**S3 credentials** expander in the sidebar."
+        )
+    elif any(k in err for k in ("AccessDenied", "403", "Forbidden")):
+        st.info(
+            "🔒 **Access denied.** Check that your credentials have "
+            "`s3:GetObject` and `s3:ListBucket` permission on this bucket."
+        )
+    elif any(k in err for k in ("InvalidClientTokenId", "AuthFailure",
+                                 "NoCredentialProviders", "Unable to locate credentials")):
+        st.info(
+            "🔑 **Credentials missing or invalid.** Open the "
+            "**S3 credentials** expander in the sidebar and enter fresh credentials."
+        )
+    elif "NoSuchBucket" in err or "NoSuchKey" in err:
+        st.info("🪣 **Bucket or path not found.** Double-check the S3 path.")
 
 
 # ── Shared output helper ──────────────────────────────────────────────────────
@@ -333,101 +426,64 @@ if st.session_state.page == "SQL Query Deduplicator":
             s3_pattern = st.text_input(
                 "File pattern",
                 placeholder="e.g. query_history*",
-                help="Glob (query_history*, *.parquet, 2024-*) or Python regex. Leave blank for a single file.",
+                help=(
+                    "Glob (query_history*, *.parquet, 2024-*) or Python regex. "
+                    "Leave blank to list all files in the folder."
+                ),
             )
 
         btn_c1, btn_c2, _ = st.columns([1, 1, 4])
         list_btn = btn_c1.button("List files", type="secondary")
         load_s3  = btn_c2.button("Load from S3", type="primary")
 
-        def _build_s3fs(key, secret, token):
-            import s3fs
-            kw = {}
-            if key:    kw["key"]    = key
-            if secret: kw["secret"] = secret
-            if token:  kw["token"]  = token
-            return s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
+        if list_btn or load_s3:
+            if not s3_prefix:
+                st.warning("Enter an S3 path first.")
+            else:
+                try:
+                    fs  = _build_s3fs(aws_key, aws_secret, aws_token)
+                    so  = {k: v for k, v in {"key": aws_key, "secret": aws_secret,
+                                              "token": aws_token}.items() if v}
+                    fmt = file_format   # "Auto-detect" | "CSV" | "Parquet"
 
-        def _resolve_files(fs, prefix, pattern, fmt):
-            import re as _re
-            bare = prefix.replace("s3://", "").rstrip("/")
-            ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
-                       "Auto-detect": (".csv", ".parquet", ".pq")}
-            exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+                    matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
 
-            # No pattern — list everything in the folder
-            if not pattern:
-                all_files = ["s3://" + f for f in fs.ls(bare)
-                             if not f.endswith("/") and f.lower().endswith(exts)]
-                return sorted(all_files)
+                    if not matched_files:
+                        st.warning(
+                            f"No files matched `{s3_pattern or '*'}` under `{s3_prefix}`. "
+                            "Check the path, pattern, and that your credentials have access."
+                        )
+                    else:
+                        st.markdown(
+                            f'<div class="results-header">'
+                            f'<span class="results-title">Matched files</span>'
+                            f'<span class="results-count">'
+                            f'{len(matched_files)} result{"s" if len(matched_files) != 1 else ""}'
+                            f'</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        for f in matched_files:
+                            st.markdown(f'<div class="file-list-item">{f}</div>',
+                                        unsafe_allow_html=True)
 
-            # 1. Try glob directly — works for query_history*, *.parquet, 2024-*, etc.
-            glob_results = ["s3://" + f for f in fs.glob(f"{bare}/{pattern}")
-                            if not f.endswith("/") and f.lower().endswith(exts)]
-            if glob_results:
-                return sorted(glob_results)
+                        if load_s3:
+                            frames = []
+                            prog = st.progress(0, text="Loading files…")
+                            for i, fpath in enumerate(matched_files):
+                                prog.progress(
+                                    (i + 1) / len(matched_files),
+                                    text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched_files)})",
+                                )
+                                frames.append(_read_s3_file(fpath, fmt, so))
+                            st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                            prog.empty()
 
-            # 2. Fall back: treat pattern as Python regex (only if valid regex)
-            try:
-                rx = _re.compile(pattern)
-            except _re.error:
-                return []   # pattern is glob-only (e.g. bare *), glob already ran above
-            all_files = ["s3://" + f for f in fs.find(bare)
-                         if not f.endswith("/") and f.lower().endswith(exts)]
-            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-            return sorted(matched)
-
-        if (list_btn or load_s3) and s3_prefix:
-            try:
-                import s3fs
-                fs    = _build_s3fs(aws_key, aws_secret, aws_token)
-                so    = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
-                fmt   = file_format
-                if fmt == "Auto-detect":
-                    # Only resolve from path when it points to a specific file
-                    if s3_prefix.lower().endswith((".parquet", ".pq")):
-                        fmt = "Parquet"
-                    elif s3_prefix.lower().endswith(".csv"):
-                        fmt = "CSV"
-                    # else: keep "Auto-detect" so both .csv and .parquet are accepted
-
-                matched_files = _resolve_files(fs, s3_prefix, s3_pattern, fmt)
-
-                if not matched_files:
-                    st.warning(f"No files matched `{s3_pattern or ''}` under `{s3_prefix}`. "
-                               f"Check the path, pattern, and that your credentials have access.")
-                else:
-                    st.markdown(
-                        f'<div class="results-header">'
-                        f'<span class="results-title">Matched files</span>'
-                        f'<span class="results-count">{len(matched_files)} result{"s" if len(matched_files)!=1 else ""}</span>'
-                        f'</div>', unsafe_allow_html=True
-                    )
-                    for f in matched_files:
-                        st.markdown(f'<div class="file-list-item">{f}</div>', unsafe_allow_html=True)
-
-                    if load_s3:
-                        frames = []
-                        prog = st.progress(0, text="Loading files…")
-                        for i, fpath in enumerate(matched_files):
-                            prog.progress((i + 1) / len(matched_files),
-                                          text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched_files)})")
-                            if fmt == "CSV":
-                                frames.append(pd.read_csv(fpath, storage_options=so or None))
-                            else:
-                                frames.append(pd.read_parquet(fpath, storage_options=so or None))
-                        st.session_state.df_raw = pd.concat(frames, ignore_index=True)
-                        prog.empty()
-
-            except ImportError:
-                st.error("s3fs is not installed. Run: pip install s3fs")
-            except Exception as e:
-                err = str(e)
-                st.error(f"S3 error: {err}")
-                if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired")):
-                    st.warning("⏱ Your AWS session token has expired. Generate new temporary credentials and paste them into the **S3 credentials** expander in the sidebar.")
-                elif any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "NoCredentialProviders", "AuthFailure")):
-                    st.info("🔑 Credentials are missing or invalid. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
+                except ImportError:
+                    st.error("s3fs is not installed. Run: pip install s3fs")
+                except Exception as e:
+                    err = str(e)
+                    st.error(f"S3 error: {err}")
+                    _s3_error_hints(err)
 
     # ── Data loaded — column picker + run ─────────────────────────────────────
     df_raw = st.session_state.df_raw
@@ -650,7 +706,10 @@ elif st.session_state.page == "Hash Generator":
             hg_s3_pattern = st.text_input(
                 "File pattern",
                 placeholder="*.parquet",
-                help="Glob (*.parquet, 2024-*) or Python regex. Leave blank for a single file.",
+                help=(
+                    "Glob (*.parquet, 2024-*) or Python regex. "
+                    "Leave blank to list all files in the folder."
+                ),
                 key="hg_s3_pattern",
             )
 
@@ -658,85 +717,54 @@ elif st.session_state.page == "Hash Generator":
         hg_list_btn = hg_btn_c1.button("List files", type="secondary", key="hg_list")
         hg_load_btn = hg_btn_c2.button("Load from S3", type="primary", key="hg_load")
 
-        if (hg_list_btn or hg_load_btn) and hg_s3_prefix:
-            try:
-                import s3fs, fnmatch
-                import re as _re2
-                kw = {}
-                if aws_key:    kw["key"]    = aws_key
-                if aws_secret: kw["secret"] = aws_secret
-                if aws_token:  kw["token"]  = aws_token
-                fs  = s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
-                so  = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
-                fmt = hg_fmt
-                if fmt == "Auto-detect":
-                    # Only resolve from path when it points to a specific file
-                    if hg_s3_prefix.lower().endswith((".parquet", ".pq")):
-                        fmt = "Parquet"
-                    elif hg_s3_prefix.lower().endswith(".csv"):
-                        fmt = "CSV"
-                    # else: keep "Auto-detect" so both .csv and .parquet are accepted
+        if hg_list_btn or hg_load_btn:
+            if not hg_s3_prefix:
+                st.warning("Enter an S3 path first.")
+            else:
+                try:
+                    fs  = _build_s3fs(aws_key, aws_secret, aws_token)
+                    so  = {k: v for k, v in {"key": aws_key, "secret": aws_secret,
+                                              "token": aws_token}.items() if v}
+                    fmt = hg_fmt   # "Auto-detect" | "CSV" | "Parquet"
 
-                bare = hg_s3_prefix.replace("s3://", "").rstrip("/")
-                ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
-                           "Auto-detect": (".csv", ".parquet", ".pq")}
-                exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+                    matched = _resolve_files(fs, hg_s3_prefix, hg_s3_pattern, fmt)
 
-                if not hg_s3_pattern:
-                    # No pattern — list everything in the folder
-                    matched = ["s3://" + f for f in fs.ls(bare)
-                               if not f.endswith("/") and f.lower().endswith(exts)]
-                    matched = sorted(matched)
-                else:
-                    # 1. Try glob first
-                    matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
-                               if not f.endswith("/") and f.lower().endswith(exts)]
-                    # 2. Fall back to regex (only if valid regex)
                     if not matched:
-                        try:
-                            rx = _re2.compile(hg_s3_pattern)
-                            all_files = ["s3://" + f for f in fs.find(bare)
-                                         if not f.endswith("/") and f.lower().endswith(exts)]
-                            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-                        except _re2.error:
-                            matched = []
-                    matched = sorted(matched)
+                        st.warning(
+                            f"No files matched `{hg_s3_pattern or '*'}` under `{hg_s3_prefix}`. "
+                            "Check the path, pattern, and that your credentials have access."
+                        )
+                    else:
+                        st.markdown(
+                            f'<div class="results-header">'
+                            f'<span class="results-title">Matched files</span>'
+                            f'<span class="results-count">'
+                            f'{len(matched)} result{"s" if len(matched) != 1 else ""}'
+                            f'</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        for f in matched:
+                            st.markdown(f'<div class="file-list-item">{f}</div>',
+                                        unsafe_allow_html=True)
 
-                if not matched:
-                    st.warning(f"No files matched `{hg_s3_pattern}` under `{hg_s3_prefix}`. "
-                               f"Check the path, pattern, and that credentials have access.")
-                else:
-                    st.markdown(
-                        f'<div class="results-header">'
-                        f'<span class="results-title">Matched files</span>'
-                        f'<span class="results-count">{len(matched)} result{"s" if len(matched)!=1 else ""}</span>'
-                        f'</div>', unsafe_allow_html=True,
-                    )
-                    for f in matched:
-                        st.markdown(f'<div class="file-list-item">{f}</div>', unsafe_allow_html=True)
+                        if hg_load_btn:
+                            frames = []
+                            prog = st.progress(0, text="Loading files…")
+                            for i, fpath in enumerate(matched):
+                                prog.progress(
+                                    (i + 1) / len(matched),
+                                    text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched)})",
+                                )
+                                frames.append(_read_s3_file(fpath, fmt, so))
+                            st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                            prog.empty()
 
-                    if hg_load_btn:
-                        frames = []
-                        prog = st.progress(0, text="Loading files…")
-                        for i, fpath in enumerate(matched):
-                            prog.progress((i + 1) / len(matched),
-                                          text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched)})")
-                            if fmt == "CSV":
-                                frames.append(pd.read_csv(fpath, storage_options=so or None))
-                            else:
-                                frames.append(pd.read_parquet(fpath, storage_options=so or None))
-                        st.session_state.hg_df = pd.concat(frames, ignore_index=True)
-                        prog.empty()
-
-            except ImportError:
-                st.error("s3fs is not installed. Run: pip install s3fs")
-            except Exception as e:
-                err = str(e)
-                st.error(f"S3 error: {err}")
-                if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired")):
-                    st.warning("⏱ Your AWS session token has expired. Generate new temporary credentials and paste them into the **S3 credentials** expander in the sidebar.")
-                elif any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "NoCredentialProviders", "AuthFailure")):
-                    st.info("🔑 Credentials are missing or invalid. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
+                except ImportError:
+                    st.error("s3fs is not installed. Run: pip install s3fs")
+                except Exception as e:
+                    err = str(e)
+                    st.error(f"S3 error: {err}")
+                    _s3_error_hints(err)
 
     hg_df = st.session_state.hg_df
 
