@@ -355,8 +355,11 @@ if st.session_state.page == "SQL Query Deduplicator":
                        "Auto-detect": (".csv", ".parquet", ".pq")}
             exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
 
+            # No pattern — list everything in the folder
             if not pattern:
-                return ["s3://" + bare]
+                all_files = ["s3://" + f for f in fs.ls(bare)
+                             if not f.endswith("/") and f.lower().endswith(exts)]
+                return sorted(all_files)
 
             # 1. Try glob directly — works for query_history*, *.parquet, 2024-*, etc.
             glob_results = ["s3://" + f for f in fs.glob(f"{bare}/{pattern}")
@@ -416,8 +419,10 @@ if st.session_state.page == "SQL Query Deduplicator":
             except Exception as e:
                 err = str(e)
                 st.error(f"S3 error: {err}")
-                if any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "ExpiredToken", "InvalidToken")):
-                    st.info("Credentials appear expired or invalid. Enter fresh credentials in the **S3 credentials** expander in the sidebar.")
+                if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired")):
+                    st.warning("⏱ Your AWS session token has expired. Generate new temporary credentials and paste them into the **S3 credentials** expander in the sidebar.")
+                elif any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "NoCredentialProviders", "AuthFailure")):
+                    st.info("🔑 Credentials are missing or invalid. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
 
     # ── Data loaded — column picker + run ─────────────────────────────────────
     df_raw = st.session_state.df_raw
@@ -668,7 +673,10 @@ elif st.session_state.page == "Hash Generator":
                 exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
 
                 if not hg_s3_pattern:
-                    matched = ["s3://" + bare]
+                    # No pattern — list everything in the folder
+                    matched = ["s3://" + f for f in fs.ls(bare)
+                               if not f.endswith("/") and f.lower().endswith(exts)]
+                    matched = sorted(matched)
                 else:
                     # 1. Try glob first
                     matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
@@ -715,8 +723,10 @@ elif st.session_state.page == "Hash Generator":
             except Exception as e:
                 err = str(e)
                 st.error(f"S3 error: {err}")
-                if any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "ExpiredToken", "InvalidToken", "NoCredentialProviders")):
-                    st.info("Credentials are missing or expired. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
+                if any(k in err for k in ("ExpiredToken", "InvalidToken", "TokenRefreshRequired")):
+                    st.warning("⏱ Your AWS session token has expired. Generate new temporary credentials and paste them into the **S3 credentials** expander in the sidebar.")
+                elif any(k in err for k in ("AccessDenied", "InvalidClientTokenId", "NoCredentialProviders", "AuthFailure")):
+                    st.info("🔑 Credentials are missing or invalid. Open the **S3 credentials** expander in the sidebar and enter fresh credentials.")
 
     hg_df = st.session_state.hg_df
 
