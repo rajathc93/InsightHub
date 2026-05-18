@@ -595,9 +595,8 @@ elif st.session_state.page == "Hash Generator":
 
     if hg_source == "Local file":
         hg_uploaded = st.file_uploader(
-            "Upload CSV or Parquet",
+            "Upload a CSV or Parquet file",
             type=["csv", "parquet", "pq"],
-            label_visibility="collapsed",
             key="hg_upload",
         )
         if hg_uploaded:
