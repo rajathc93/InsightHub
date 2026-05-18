@@ -364,10 +364,13 @@ if st.session_state.page == "SQL Query Deduplicator":
             if glob_results:
                 return sorted(glob_results)
 
-            # 2. Fall back: find all files then apply as Python regex
+            # 2. Fall back: treat pattern as Python regex (only if valid regex)
+            try:
+                rx = _re.compile(pattern)
+            except _re.error:
+                return []   # pattern is glob-only (e.g. bare *), glob already ran above
             all_files = ["s3://" + f for f in fs.find(bare)
                          if not f.endswith("/") and f.lower().endswith(exts)]
-            rx = _re.compile(pattern)
             matched = [f for f in all_files if rx.search(f.split("/")[-1])]
             return sorted(matched)
 
@@ -670,12 +673,15 @@ elif st.session_state.page == "Hash Generator":
                     # 1. Try glob first
                     matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
                                if not f.endswith("/") and f.lower().endswith(exts)]
-                    # 2. Fall back to regex
+                    # 2. Fall back to regex (only if valid regex)
                     if not matched:
-                        all_files = ["s3://" + f for f in fs.find(bare)
-                                     if not f.endswith("/") and f.lower().endswith(exts)]
-                        rx = _re2.compile(hg_s3_pattern)
-                        matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+                        try:
+                            rx = _re2.compile(hg_s3_pattern)
+                            all_files = ["s3://" + f for f in fs.find(bare)
+                                         if not f.endswith("/") and f.lower().endswith(exts)]
+                            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+                        except _re2.error:
+                            matched = []
                     matched = sorted(matched)
 
                 if not matched:
