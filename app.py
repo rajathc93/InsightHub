@@ -578,27 +578,118 @@ elif st.session_state.page == "Hash Generator":
 
     st.markdown('<div style="height:4px"></div>', unsafe_allow_html=True)
 
-    # ── File upload ───────────────────────────────────────────────────────────
-    st.markdown("**Upload file**")
+    # ── Data source ───────────────────────────────────────────────────────────
+    st.markdown("**Data source**")
+    hg_source = st.radio("Source", ["Local file", "S3 path"], horizontal=True,
+                         label_visibility="collapsed", key="hg_source")
+
     hg_fmt = st.selectbox("Input format", ["Auto-detect", "CSV", "Parquet"], key="hg_fmt")
-    hg_uploaded = st.file_uploader(
-        "Upload CSV or Parquet",
-        type=["csv", "parquet", "pq"],
-        label_visibility="collapsed",
-        key="hg_upload",
-    )
 
     if "hg_df" not in st.session_state:
         st.session_state.hg_df = None
+    if "hg_last_source" not in st.session_state:
+        st.session_state.hg_last_source = hg_source
+    if st.session_state.hg_last_source != hg_source:
+        st.session_state.hg_df = None
+        st.session_state.hg_last_source = hg_source
 
-    if hg_uploaded:
-        fmt = hg_fmt
-        if fmt == "Auto-detect":
-            fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
-        try:
-            st.session_state.hg_df = pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
+    if hg_source == "Local file":
+        hg_uploaded = st.file_uploader(
+            "Upload CSV or Parquet",
+            type=["csv", "parquet", "pq"],
+            label_visibility="collapsed",
+            key="hg_upload",
+        )
+        if hg_uploaded:
+            fmt = hg_fmt
+            if fmt == "Auto-detect":
+                fmt = "Parquet" if hg_uploaded.name.endswith((".parquet", ".pq")) else "CSV"
+            try:
+                st.session_state.hg_df = pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+
+    else:  # S3
+        hg_c1, hg_c2 = st.columns([2, 1])
+        with hg_c1:
+            hg_s3_prefix = st.text_input(
+                "S3 path / prefix",
+                placeholder="s3://my-bucket/queries/",
+                key="hg_s3_prefix",
+            )
+        with hg_c2:
+            hg_s3_pattern = st.text_input(
+                "File pattern",
+                placeholder="*.parquet",
+                help="Glob (*.parquet, 2024-*) or Python regex. Leave blank for a single file.",
+                key="hg_s3_pattern",
+            )
+
+        hg_btn_c1, hg_btn_c2, _ = st.columns([1, 1, 4])
+        hg_list_btn = hg_btn_c1.button("List files", type="secondary", key="hg_list")
+        hg_load_btn = hg_btn_c2.button("Load from S3", type="primary", key="hg_load")
+
+        if (hg_list_btn or hg_load_btn) and hg_s3_prefix:
+            try:
+                import s3fs, fnmatch
+                import re as _re2
+                kw = {}
+                if aws_key:    kw["key"]    = aws_key
+                if aws_secret: kw["secret"] = aws_secret
+                if aws_token:  kw["token"]  = aws_token
+                fs  = s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
+                so  = {k: v for k, v in {"key": aws_key, "secret": aws_secret, "token": aws_token}.items() if v}
+                fmt = hg_fmt
+                if fmt == "Auto-detect":
+                    fmt = "Parquet" if hg_s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
+
+                bare = hg_s3_prefix.replace("s3://", "")
+                if not hg_s3_pattern:
+                    matched = [hg_s3_prefix.rstrip("/")]
+                else:
+                    ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
+                               "Auto-detect": (".csv", ".parquet", ".pq")}
+                    exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+                    all_files = ["s3://" + f for f in fs.find(bare) if not f.endswith("/")]
+                    all_files = [f for f in all_files if f.lower().endswith(exts)]
+                    try:
+                        matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], hg_s3_pattern)]
+                        if not matched:
+                            rx = _re2.compile(hg_s3_pattern)
+                            matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+                    except _re2.error:
+                        matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], hg_s3_pattern)]
+                    matched = sorted(matched)
+
+                if not matched:
+                    st.warning("No files matched. Check your path and pattern.")
+                else:
+                    st.markdown(
+                        f'<div class="results-header">'
+                        f'<span class="results-title">Matched files</span>'
+                        f'<span class="results-count">{len(matched)} result{"s" if len(matched)!=1 else ""}</span>'
+                        f'</div>', unsafe_allow_html=True,
+                    )
+                    for f in matched:
+                        st.markdown(f'<div class="file-list-item">{f}</div>', unsafe_allow_html=True)
+
+                    if hg_load_btn:
+                        frames = []
+                        prog = st.progress(0, text="Loading files…")
+                        for i, fpath in enumerate(matched):
+                            prog.progress((i + 1) / len(matched),
+                                          text=f"Reading {fpath.split('/')[-1]}  ({i+1}/{len(matched)})")
+                            if fmt == "CSV":
+                                frames.append(pd.read_csv(fpath, storage_options=so or None))
+                            else:
+                                frames.append(pd.read_parquet(fpath, storage_options=so or None))
+                        st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                        prog.empty()
+
+            except ImportError:
+                st.error("s3fs is not installed. Run: pip install s3fs")
+            except Exception as e:
+                st.error(f"S3 error: {e}")
 
     hg_df = st.session_state.hg_df
 
