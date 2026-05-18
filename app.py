@@ -320,8 +320,8 @@ if st.session_state.page == "SQL Query Deduplicator":
         with c2:
             s3_pattern = st.text_input(
                 "File pattern",
-                placeholder="*.parquet",
-                help="Glob (*.parquet, 2024-*) or Python regex. Leave blank for single file.",
+                placeholder="e.g. query_history*",
+                help="Glob (query_history*, *.parquet, 2024-*) or Python regex. Leave blank for a single file.",
             )
 
         btn_c1, btn_c2, _ = st.columns([1, 1, 4])
@@ -337,26 +337,33 @@ if st.session_state.page == "SQL Query Deduplicator":
             return s3fs.S3FileSystem(**kw) if kw else s3fs.S3FileSystem(anon=False)
 
         def _resolve_files(fs, prefix, pattern, fmt):
-            import re as _re, fnmatch
-            bare = prefix.replace("s3://", "")
-            if not pattern:
-                return [prefix.rstrip("/")]
-            try:
-                all_files = ["s3://" + f for f in fs.find(bare) if not f.endswith("/")]
-            except Exception:
-                all_files = []
+            import re as _re
+            bare = prefix.replace("s3://", "").rstrip("/")
             ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
                        "Auto-detect": (".csv", ".parquet", ".pq")}
             exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
-            all_files = [f for f in all_files if f.lower().endswith(exts)]
+
+            if not pattern:
+                return ["s3://" + bare]
+
+            # 1. Try glob directly — works for *.parquet, 2024-*, etc.
             try:
-                matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
-                if not matched:
-                    rx = _re.compile(pattern)
-                    matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-            except _re.error:
-                matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], pattern)]
-            return sorted(matched)
+                glob_results = ["s3://" + f for f in fs.glob(f"{bare}/{pattern}")
+                                if not f.endswith("/") and f.lower().endswith(exts)]
+                if glob_results:
+                    return sorted(glob_results)
+            except Exception:
+                pass
+
+            # 2. Fall back: find all files then apply as Python regex
+            try:
+                all_files = ["s3://" + f for f in fs.find(bare)
+                             if not f.endswith("/") and f.lower().endswith(exts)]
+                rx = _re.compile(pattern)
+                matched = [f for f in all_files if rx.search(f.split("/")[-1])]
+                return sorted(matched)
+            except Exception:
+                return []
 
         if (list_btn or load_s3) and s3_prefix:
             try:
@@ -642,22 +649,29 @@ elif st.session_state.page == "Hash Generator":
                 if fmt == "Auto-detect":
                     fmt = "Parquet" if hg_s3_prefix.lower().endswith((".parquet", ".pq")) else "CSV"
 
-                bare = hg_s3_prefix.replace("s3://", "")
+                bare = hg_s3_prefix.replace("s3://", "").rstrip("/")
+                ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
+                           "Auto-detect": (".csv", ".parquet", ".pq")}
+                exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
+
                 if not hg_s3_pattern:
-                    matched = [hg_s3_prefix.rstrip("/")]
+                    matched = ["s3://" + bare]
                 else:
-                    ext_map = {"CSV": (".csv",), "Parquet": (".parquet", ".pq"),
-                               "Auto-detect": (".csv", ".parquet", ".pq")}
-                    exts = ext_map.get(fmt, (".csv", ".parquet", ".pq"))
-                    all_files = ["s3://" + f for f in fs.find(bare) if not f.endswith("/")]
-                    all_files = [f for f in all_files if f.lower().endswith(exts)]
+                    # 1. Try glob first
                     try:
-                        matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], hg_s3_pattern)]
-                        if not matched:
+                        matched = ["s3://" + f for f in fs.glob(f"{bare}/{hg_s3_pattern}")
+                                   if not f.endswith("/") and f.lower().endswith(exts)]
+                    except Exception:
+                        matched = []
+                    # 2. Fall back to regex
+                    if not matched:
+                        try:
+                            all_files = ["s3://" + f for f in fs.find(bare)
+                                         if not f.endswith("/") and f.lower().endswith(exts)]
                             rx = _re2.compile(hg_s3_pattern)
                             matched = [f for f in all_files if rx.search(f.split("/")[-1])]
-                    except _re2.error:
-                        matched = [f for f in all_files if fnmatch.fnmatch(f.split("/")[-1], hg_s3_pattern)]
+                        except Exception:
+                            matched = []
                     matched = sorted(matched)
 
                 if not matched:
