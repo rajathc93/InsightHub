@@ -200,11 +200,16 @@ class TestEndToEnd:
     def test_sample_csv(self):
         """Load sample_queries.csv and check reasonable deduplication."""
         df = pd.read_csv("sample_queries.csv")
-        df["_pattern"] = df["query"].map(normalize)
+        # Detect the SQL column (first column whose values look like SQL)
+        sql_col = next(
+            (c for c in df.columns if df[c].astype(str).str.contains(r"\bselect\b", case=False, regex=True).any()),
+            df.columns[0],
+        )
+        df["_pattern"] = df[sql_col].map(normalize)
         unique_patterns = df["_pattern"].nunique()
         total = len(df)
         assert unique_patterns < total, "Should have fewer patterns than raw queries"
-        print(f"\n  sample_queries.csv: {total} queries → {unique_patterns} patterns")
+        print(f"\n  sample_queries.csv: {total} queries → {unique_patterns} patterns (col: {sql_col!r})")
 
     def test_output_contains_real_sql(self):
         """Representative query must be the original SQL, not a normalised form."""
