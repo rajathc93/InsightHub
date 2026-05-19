@@ -153,10 +153,83 @@ def _s3_error_hints(err: str):
         st.info("🪣 **Bucket or path not found.** Double-check the S3 path.")
 
 
+# ── Filename generation helper ────────────────────────────────────────────────
+def _generate_output_filename(source_files: list[str], fmt: str) -> str:
+    """
+    Generate an output filename based on source file names.
+
+    Logic:
+    - Extract dates from filenames (e.g., query_history_20260424_02.parquet)
+    - If all files have the same date → use that date
+    - If files span multiple dates in same month → truncate to month
+    - Preserves the common prefix (e.g., query_history_)
+
+    Returns: filename like query_history_20260424.parquet
+    """
+    if not source_files:
+        return f"output.{fmt.lower()}"
+
+    # Extract just the filenames (not full paths)
+    filenames = [f.split("/")[-1] for f in source_files]
+
+    # Try to extract dates (YYYYMMDD pattern) from filenames
+    date_pattern = _re.compile(r'(\d{8})')
+    dates = set()
+    prefixes = []
+
+    for fname in filenames:
+        match = date_pattern.search(fname)
+        if match:
+            dates.add(match.group(1))
+            # Extract prefix (everything before the date)
+            prefix = fname[:match.start()].rstrip("_- ")
+            if prefix:
+                prefixes.append(prefix)
+
+    # Determine the common prefix
+    if prefixes:
+        # Use the most common prefix, or the first one if all different
+        from collections import Counter
+        prefix = Counter(prefixes).most_common(1)[0][0]
+    else:
+        # Fallback: extract common prefix from filenames
+        if len(filenames) == 1:
+            # Single file: use its name without extension and trailing numbers
+            base = _re.sub(r'\.(parquet|pq|csv)$', '', filenames[0], flags=_re.IGNORECASE)
+            base = _re.sub(r'[_-]?\d+$', '', base)  # Remove trailing numbers
+            prefix = base if base else "output"
+        else:
+            prefix = "output"
+
+    # Determine the date suffix
+    ext = ".parquet" if fmt == "Parquet" else ".csv"
+
+    if not dates:
+        # No dates found in filenames
+        return f"{prefix}_hashed{ext}"
+
+    dates_sorted = sorted(dates)
+
+    if len(dates_sorted) == 1:
+        # All files from same date
+        return f"{prefix}_{dates_sorted[0]}{ext}"
+
+    # Check if all dates are in the same month
+    months = set(d[:6] for d in dates_sorted)  # YYYYMM
+    if len(months) == 1:
+        # Same month, different days → use month
+        return f"{prefix}_{dates_sorted[0][:6]}{ext}"
+
+    # Different months → use date range or just first month
+    # For simplicity, use the earliest month
+    return f"{prefix}_{min(months)}{ext}"
+
+
 # ── Shared output helper ──────────────────────────────────────────────────────
 def _output_widget(df: pd.DataFrame, default_filename: str,
                    fmt: str, note: str, key_prefix: str,
-                   aws_key: str, aws_secret: str, aws_token: str):
+                   aws_key: str, aws_secret: str, aws_token: str,
+                   source_files: list[str] = None):
     """
     Renders a Download / Write to S3 output section.
     fmt: 'Parquet' or 'CSV'
@@ -192,22 +265,34 @@ def _output_widget(df: pd.DataFrame, default_filename: str,
         )
 
     else:  # Write to S3
+        # Generate auto filename based on source files
+        auto_filename = _generate_output_filename(source_files, fmt) if source_files else filename
+
         s3_out = st.text_input(
-            "S3 output path",
-            placeholder="s3://my-bucket/output/results.parquet",
+            "S3 output folder",
+            placeholder="s3://my-bucket/output/",
             key=f"{key_prefix}_s3out",
-            help="Full S3 path including filename.",
+            help="S3 folder path. Filename will be auto-generated based on input files.",
         )
+
+        # Show the auto-generated filename
+        if s3_out:
+            folder_path = s3_out.rstrip("/") + "/"
+            preview_path = folder_path + auto_filename
+            st.markdown(
+                f'<p style="font-size:12px;color:#6B7280;margin:4px 0 8px 0">'
+                f'Output file: <code>{preview_path}</code></p>',
+                unsafe_allow_html=True,
+            )
+
         if st.button("☁  Write to S3", type="primary", key=f"{key_prefix}_s3btn"):
             if not s3_out:
-                st.warning("Enter an S3 output path first.")
+                st.warning("Enter an S3 output folder first.")
             else:
-                # Auto-append the correct extension if the path has none
-                _ext = ".parquet" if fmt == "Parquet" else ".csv"
-                if not s3_out.rstrip("/").lower().endswith((".parquet", ".pq", ".csv")):
-                    s3_out_final = s3_out.rstrip("/") + _ext
-                else:
-                    s3_out_final = s3_out
+                # Build the full path: folder + auto-generated filename
+                folder_path = s3_out.rstrip("/") + "/"
+                s3_out_final = folder_path + auto_filename
+
                 try:
                     import s3fs
                     kw = {}
@@ -219,7 +304,7 @@ def _output_widget(df: pd.DataFrame, default_filename: str,
                     with st.spinner(f"Uploading {size_mb:.1f} MB to S3…"):
                         with fs.open(s3_out_final, "wb") as f:
                             f.write(file_bytes)
-                    st.success(f"✅ Written → `{s3_out_final}`  ({size_mb:.1f} MB)")
+                    st.success(f"Written → `{s3_out_final}`  ({size_mb:.1f} MB)")
                 except ImportError:
                     st.error("s3fs is not installed. Run: pip install s3fs")
                 except Exception as e:
@@ -248,10 +333,14 @@ if "df_raw" not in st.session_state:
     st.session_state.df_raw = None
 if "dedup_result" not in st.session_state:
     st.session_state.dedup_result = None   # persists dedup output across reruns
+if "dedup_source_files" not in st.session_state:
+    st.session_state.dedup_source_files = None  # tracks input filenames for output naming
 if "hg_df" not in st.session_state:
     st.session_state.hg_df = None
 if "hg_result" not in st.session_state:
     st.session_state.hg_result = None      # persists hash output across reruns
+if "hg_source_files" not in st.session_state:
+    st.session_state.hg_source_files = None  # tracks input filenames for output naming
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -462,6 +551,7 @@ if st.session_state.page == "SQL Query Deduplicator":
         st.session_state.last_source = source
     if st.session_state.last_source != source:
         st.session_state.df_raw = None
+        st.session_state.dedup_source_files = None
         st.session_state.dedup_result = None
         st.session_state.last_source = source
 
@@ -479,6 +569,7 @@ if st.session_state.page == "SQL Query Deduplicator":
             st.session_state.dedup_last_local_mode = local_mode
         if st.session_state.dedup_last_local_mode != local_mode:
             st.session_state.df_raw = None
+            st.session_state.dedup_source_files = None
             st.session_state.dedup_result = None
             st.session_state.dedup_last_local_mode = local_mode
 
@@ -501,6 +592,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                         st.session_state.df_raw = (
                             pd.read_csv(uploaded) if fmt == "CSV" else pd.read_parquet(uploaded)
                         )
+                        st.session_state.dedup_source_files = [uploaded.name]  # Store source filename
                         st.session_state.dedup_result = None
                         st.session_state.dedup_uploaded_file_id = _dedup_fid
                     except Exception as e:
@@ -565,6 +657,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                                     )
                                     frames.append(_read_local_file(fpath, file_format))
                                 st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                                st.session_state.dedup_source_files = matched_local  # Store source filenames
                                 st.session_state.dedup_result = None
                                 prog.empty()
                             except Exception as e:
@@ -631,6 +724,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                                 )
                                 frames.append(_read_s3_file(fpath, fmt, so))
                             st.session_state.df_raw = pd.concat(frames, ignore_index=True)
+                            st.session_state.dedup_source_files = matched_files  # Store source filenames
                             st.session_state.dedup_result = None
                             prog.empty()
 
@@ -649,6 +743,7 @@ if st.session_state.page == "SQL Query Deduplicator":
         with clear_c:
             if st.button("✕ Clear", use_container_width=True):
                 st.session_state.df_raw = None
+                st.session_state.dedup_source_files = None
                 st.session_state.dedup_result = None
                 st.rerun()
         with info_c:
@@ -699,51 +794,56 @@ if st.session_state.page == "SQL Query Deduplicator":
             st.session_state.dedup_result = None
 
         if run_btn:
-            queries = df_raw[query_col].dropna().astype(str)
-            total   = len(queries)
-
-            prog = st.progress(0, text="Normalising queries…")
-
+            # Filter out null/empty values consistently
             work_df = df_raw.copy()
-            norms, fids = [], []
-            for i, q in enumerate(df_raw[query_col].fillna("").astype(str)):
-                norm = normalize(q)
-                norms.append(norm)
-                fids.append(fingerprint_id(norm))
-                if i % 500 == 0:
-                    prog.progress(min(i / total, 1.0),
-                                  text=f"Normalising…  {i:,} / {total:,}")
+            work_df = work_df[work_df[query_col].notna() & (work_df[query_col].astype(str).str.strip() != "")]
+            work_df = work_df.reset_index(drop=True)
+            total = len(work_df)
 
-            work_df["_pattern"]    = norms
-            work_df["_pattern_id"] = fids
-            prog.progress(1.0, text="Grouping…")
-            work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
+            if total == 0:
+                st.warning("No valid queries found in the selected column. All values are null or empty.")
+            else:
+                prog = st.progress(0, text="Normalising queries…")
 
-            result_df = (
-                work_df
-                .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
-                .reset_index(drop=True)
-            )
+                norms, fids = [], []
+                for i, q in enumerate(work_df[query_col].astype(str)):
+                    norm = normalize(q)
+                    norms.append(norm)
+                    fids.append(fingerprint_id(norm))
+                    if i % 500 == 0:
+                        prog.progress(i / total,
+                                      text=f"Normalising…  {i:,} / {total:,}")
 
-            dedup_df = (
-                result_df
-                .groupby("_pattern_id", sort=False)[query_col]
-                .first()
-                .reset_index(drop=True)
-                .to_frame(name=query_col)
-            )
+                work_df["_pattern"]    = norms
+                work_df["_pattern_id"] = fids
+                prog.progress(1.0, text="Grouping…")
+                work_df["_pattern_count"] = work_df.groupby("_pattern_id")["_pattern_id"].transform("count")
 
-            unique_patterns = work_df["_pattern_id"].nunique()
-            prog.empty()
+                result_df = (
+                    work_df
+                    .sort_values(["_pattern_count", "_pattern_id"], ascending=[False, True])
+                    .reset_index(drop=True)
+                )
 
-            # Persist so the output section survives reruns triggered by
-            # widget interactions (e.g. switching to "Write to S3")
-            st.session_state.dedup_result = {
-                "dedup_df":       dedup_df,
-                "total":          total,
-                "unique_patterns": unique_patterns,
-                "query_col":      query_col,
-            }
+                dedup_df = (
+                    result_df
+                    .groupby("_pattern_id", sort=False)[query_col]
+                    .first()
+                    .reset_index(drop=True)
+                    .to_frame(name=query_col)
+                )
+
+                unique_patterns = work_df["_pattern_id"].nunique()
+                prog.empty()
+
+                # Persist so the output section survives reruns triggered by
+                # widget interactions (e.g. switching to "Write to S3")
+                st.session_state.dedup_result = {
+                    "dedup_df":       dedup_df,
+                    "total":          total,
+                    "unique_patterns": unique_patterns,
+                    "query_col":      query_col,
+                }
 
         # ── Render results (from state — survives any rerun) ──────────────────
         if st.session_state.dedup_result is not None:
@@ -752,6 +852,10 @@ if st.session_state.page == "SQL Query Deduplicator":
             total        = res["total"]
             unique_patterns = res["unique_patterns"]
             query_col    = res["query_col"]
+
+            # Safe division for stats
+            avg_per_pattern = total / unique_patterns if unique_patterns > 0 else 0
+            reduction_pct = (1 - unique_patterns / total) * 100 if total > 0 else 0
 
             st.markdown(f"""
             <div class="stats-row">
@@ -765,11 +869,11 @@ if st.session_state.page == "SQL Query Deduplicator":
               </div>
               <div class="stat-card">
                 <div class="stat-label">Avg queries / pattern</div>
-                <div class="stat-value">{total / unique_patterns:.1f}</div>
+                <div class="stat-value">{avg_per_pattern:.1f}</div>
               </div>
               <div class="stat-card">
                 <div class="stat-label">Reduction potential</div>
-                <div class="stat-value green">{(1 - unique_patterns/total)*100:.1f}%</div>
+                <div class="stat-value green">{reduction_pct:.1f}%</div>
               </div>
             </div>
             """, unsafe_allow_html=True)
@@ -799,6 +903,7 @@ if st.session_state.page == "SQL Query Deduplicator":
                 note="Output is the original query text — comments, casing, and filter values are untouched. Parquet is used to avoid CSV cell character limits.",
                 key_prefix="dedup",
                 aws_key=aws_key, aws_secret=aws_secret, aws_token=aws_token,
+                source_files=st.session_state.dedup_source_files,
             )
 
 
@@ -807,7 +912,6 @@ if st.session_state.page == "SQL Query Deduplicator":
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "Hash Generator":
     import hashlib
-    import re as _re
 
     st.markdown("""
     <div class="page-header">
@@ -817,17 +921,27 @@ elif st.session_state.page == "Hash Generator":
     """, unsafe_allow_html=True)
 
     # ── Helper functions ──────────────────────────────────────────────────────
-    def _hash_query(query: str) -> Optional[str]:
-        if not isinstance(query, str):
+    def _hash_query(query) -> Optional[str]:
+        """Generate SHA-256 hash for a query. Returns None for null/empty values."""
+        if query is None or (isinstance(query, float) and pd.isna(query)):
             return None
-        normalized = _re.sub(r"\s+", "", query)
+        query_str = str(query).strip()
+        if not query_str:
+            return None
+        normalized = _re.sub(r"\s+", "", query_str)
         return hashlib.sha256(normalized.encode()).hexdigest()
 
-    def _embed_hash_comment(query: str, company: str) -> str:
+    def _embed_hash_comment(query, company: str) -> Optional[str]:
+        """Embed hash as comment. Returns None for null/empty values."""
+        if query is None or (isinstance(query, float) and pd.isna(query)):
+            return None
+        query_str = str(query).strip()
+        if not query_str:
+            return None
         h = _hash_query(query)
         if h is None:
-            return query
-        return f"/* {company}::{h} */\n{query}"
+            return None
+        return f"/* {company}::{h} */\n{query_str}"
 
     # ── Config ────────────────────────────────────────────────────────────────
     st.markdown("**Configuration**")
@@ -852,6 +966,7 @@ elif st.session_state.page == "Hash Generator":
         st.session_state.hg_last_source = hg_source
     if st.session_state.hg_last_source != hg_source:
         st.session_state.hg_df = None
+        st.session_state.hg_source_files = None
         st.session_state.hg_result = None
         st.session_state.hg_last_source = hg_source
 
@@ -869,6 +984,7 @@ elif st.session_state.page == "Hash Generator":
             st.session_state.hg_last_local_mode = hg_local_mode
         if st.session_state.hg_last_local_mode != hg_local_mode:
             st.session_state.hg_df = None
+            st.session_state.hg_source_files = None
             st.session_state.hg_result = None
             st.session_state.hg_last_local_mode = hg_local_mode
 
@@ -891,6 +1007,7 @@ elif st.session_state.page == "Hash Generator":
                         st.session_state.hg_df = (
                             pd.read_csv(hg_uploaded) if fmt == "CSV" else pd.read_parquet(hg_uploaded)
                         )
+                        st.session_state.hg_source_files = [hg_uploaded.name]  # Store source filename
                         st.session_state.hg_result = None
                         st.session_state.hg_uploaded_file_id = _hg_fid
                     except Exception as e:
@@ -955,6 +1072,7 @@ elif st.session_state.page == "Hash Generator":
                                     )
                                     frames.append(_read_local_file(fpath, hg_fmt))
                                 st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                                st.session_state.hg_source_files = hg_matched_local  # Store source filenames
                                 st.session_state.hg_result = None
                                 prog.empty()
                             except Exception as e:
@@ -1023,6 +1141,7 @@ elif st.session_state.page == "Hash Generator":
                                 )
                                 frames.append(_read_s3_file(fpath, fmt, so))
                             st.session_state.hg_df = pd.concat(frames, ignore_index=True)
+                            st.session_state.hg_source_files = matched  # Store source filenames
                             st.session_state.hg_result = None
                             prog.empty()
 
@@ -1041,6 +1160,7 @@ elif st.session_state.page == "Hash Generator":
         with clear_c:
             if st.button("✕ Clear", key="hg_clear", use_container_width=True):
                 st.session_state.hg_df = None
+                st.session_state.hg_source_files = None
                 st.session_state.hg_result = None
                 st.rerun()
         with info_c:
@@ -1057,14 +1177,12 @@ elif st.session_state.page == "Hash Generator":
             st.dataframe(hg_df.head(5), use_container_width=True)
 
         # ── Column + output config ────────────────────────────────────────────
-        st.markdown("**Which column contains the SQL queries?**")
         col_c1, col_c2 = st.columns([2, 2])
 
         with col_c1:
             hg_query_col = st.selectbox(
-                "SQL query column",
+                "Which column contains the SQL queries?",
                 options=list(hg_df.columns),
-                label_visibility="collapsed",
                 key="hg_query_col",
             )
         with col_c2:
@@ -1113,28 +1231,33 @@ elif st.session_state.page == "Hash Generator":
             hashes, commented = [], []
             total = len(out_df)
 
-            for i, q in enumerate(out_df[hg_query_col].astype(str)):
-                hashes.append(_hash_query(q))
-                commented.append(_embed_hash_comment(q, company))
-                if i % 500 == 0:
-                    prog.progress(min(i / total, 1.0), text=f"Hashing…  {i:,} / {total:,}")
+            if total == 0:
+                st.warning("No data to process.")
+                prog.empty()
+            else:
+                # Iterate over raw values to properly detect nulls
+                for i, q in enumerate(out_df[hg_query_col]):
+                    hashes.append(_hash_query(q))
+                    commented.append(_embed_hash_comment(q, company))
+                    if i % 500 == 0:
+                        prog.progress(i / total, text=f"Hashing…  {i:,} / {total:,}")
 
-            # Original column is never modified — two new columns are added
-            out_df[hg_hash_col] = hashes
-            out_df[hashed_col]  = commented
-            prog.progress(1.0, text="Done")
-            prog.empty()
+                # Original column is never modified — two new columns are added
+                out_df[hg_hash_col] = hashes
+                out_df[hashed_col]  = commented
+                prog.progress(1.0, text="Done")
+                prog.empty()
 
-            # Persist so output section survives reruns (e.g. switching to "Write to S3")
-            st.session_state.hg_result = {
-                "out_df":     out_df,
-                "total":      total,
-                "company":    company,
-                "query_col":  hg_query_col,
-                "hash_col":   hg_hash_col,
-                "hashed_col": hashed_col,
-                "out_fmt":    hg_out_fmt,
-            }
+                # Persist so output section survives reruns (e.g. switching to "Write to S3")
+                st.session_state.hg_result = {
+                    "out_df":     out_df,
+                    "total":      total,
+                    "company":    company,
+                    "query_col":  hg_query_col,
+                    "hash_col":   hg_hash_col,
+                    "hashed_col": hashed_col,
+                    "out_fmt":    hg_out_fmt,
+                }
 
         # ── Render results (from state — survives any rerun) ──────────────────
         if st.session_state.hg_result is not None:
@@ -1187,4 +1310,5 @@ elif st.session_state.page == "Hash Generator":
                 note=f"Hash format: <code>/* {company}::&lt;sha256&gt; */</code> — whitespace is stripped before hashing so formatting differences do not affect the hash.",
                 key_prefix="hg",
                 aws_key=aws_key, aws_secret=aws_secret, aws_token=aws_token,
+                source_files=st.session_state.hg_source_files,
             )
